@@ -6,7 +6,7 @@ mod worker_thread;
 
 use crate::{
     threading::SageThread,
-    worker_thread::{WorkerEvent, WorkerThread},
+    worker_thread::{Worker, WorkerEvent},
 };
 
 fn setup_logger() -> Result<(), log::SetLoggerError> {
@@ -21,10 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_logger()?;
 
     {
-        let mut worker = SageThread::<WorkerThread>::new("worker-A");
+        let mut worker = SageThread::<Worker>::new("worker-A");
         worker.start().expect("Failed to start worker");
-        worker.transmit_event(WorkerEvent::TestA)?;
-        worker.transmit_event(WorkerEvent::TestB)?;
+        worker.transmit_event(WorkerEvent::TestA);
+        worker.transmit_event(WorkerEvent::TestB);
 
         log::info!("sleeping for 100ms");
         std::thread::sleep(std::time::Duration::from_millis(100));

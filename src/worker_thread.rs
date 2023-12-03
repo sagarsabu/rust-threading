@@ -1,26 +1,24 @@
-use crate::{errors::WorkerError, threading};
+use crate::threading;
 
 pub enum WorkerEvent {
     TestA,
     TestB,
 }
 
-pub struct WorkerThread {}
+pub struct Worker {}
 
-impl threading::Worker for WorkerThread {
-    type Event = WorkerEvent;
+impl threading::ThreadHandler for Worker {
+    type HandlerEvent = WorkerEvent;
 
     fn starting() {
         log::info!("starting worker thread");
     }
 
-    fn handle_event(event: WorkerEvent) -> Result<(), WorkerError> {
+    fn handle_event(event: WorkerEvent) {
         match event {
             WorkerEvent::TestA => log::info!("got event - a"),
             WorkerEvent::TestB => log::info!("got event - b"),
         }
-
-        Ok(())
     }
 
     fn stopping() {

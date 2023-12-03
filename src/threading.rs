@@ -2,29 +2,37 @@ use crate::errors::WorkerError;
 use crossbeam_channel::{Receiver, Sender};
 use std::thread;
 
-pub trait Worker {
-    type Event: Send + Sync;
+pub trait ThreadHandler {
+    type HandlerEvent: Send + Sync;
 
     fn starting();
 
     fn stopping();
 
-    fn handle_event(event: Self::Event) -> Result<(), WorkerError>;
+    fn handle_event(event: Self::HandlerEvent);
+}
+
+enum ThreadEvent<T>
+where
+    T: ThreadHandler,
+{
+    HandlerEvent(T::HandlerEvent),
+    Exit,
 }
 
 pub struct SageThread<T>
 where
-    T: Worker + 'static,
+    T: ThreadHandler + 'static,
 {
     thread_name: String,
-    tx_channel: Option<Sender<T::Event>>,
-    rx_channel: Receiver<T::Event>,
+    tx_channel: Sender<ThreadEvent<T>>,
+    rx_channel: Receiver<ThreadEvent<T>>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl<T> SageThread<T>
 where
-    T: Worker + 'static,
+    T: ThreadHandler + 'static,
 {
     pub fn new<StrLike: AsRef<str>>(thread_name: StrLike) -> Self {
         log::info!("creating thread {}", thread_name.as_ref());
@@ -33,7 +41,7 @@ where
 
         Self {
             thread_name: thread_name.as_ref().to_owned(),
-            tx_channel: Some(tx_channel),
+            tx_channel,
             rx_channel,
             thread_handle: None,
         }
@@ -55,9 +63,15 @@ where
     pub fn stop(&mut self) -> Result<(), WorkerError> {
         T::stopping();
         if let Some(handle) = self.thread_handle.take() {
-            if let Some(_tx_channel) = self.tx_channel.take() {
-                log::info!("dropping tx channel");
+            let mut exit_attempt = 0u8;
+            while self.tx_channel.send(ThreadEvent::Exit).is_err() {
+                exit_attempt += 1;
+                log::error!(
+                    "failed to send exit event for attempt: {}. trying again.",
+                    exit_attempt
+                );
             }
+
             handle
                 .join()
                 .map_err(|e| WorkerError::Any(format!("{e:?}")))?;
@@ -68,26 +82,20 @@ where
         Ok(())
     }
 
-    pub fn transmit_event(&self, event: T::Event) -> Result<(), WorkerError> {
-        if let Some(tx_channel) = &self.tx_channel {
-            match tx_channel.send(event) {
-                Ok(_) => log::debug!("transmitted event"),
-                Err(e) => log::error!("failed to transmit event {}", e),
-            }
-        } else {
-            log::error!("tx channel is none");
+    pub fn transmit_event(&self, event: T::HandlerEvent) {
+        match self.tx_channel.send(ThreadEvent::HandlerEvent(event)) {
+            Ok(_) => log::debug!("transmitted event"),
+            Err(e) => log::error!("failed to transmit event {}", e),
         }
-
-        Ok(())
     }
 
-    fn process_events(rx_channel: Receiver<T::Event>) {
+    fn process_events(rx_channel: Receiver<ThreadEvent<T>>) {
         log::info!("processing events started");
 
         for rx_event in rx_channel.iter() {
-            match T::handle_event(rx_event) {
-                Ok(_) => log::debug!("handled event"),
-                Err(e) => log::error!("failed to handle event. {}", e),
+            match rx_event {
+                ThreadEvent::Exit => break,
+                ThreadEvent::HandlerEvent(handler_event) => T::handle_event(handler_event),
             }
         }
 
@@ -97,12 +105,12 @@ where
 
 impl<T> Drop for SageThread<T>
 where
-    T: Worker + 'static,
+    T: ThreadHandler + 'static,
 {
     fn drop(&mut self) {
         match self.stop() {
-            Ok(_) => log::info!("stopped worker name: {}", self.thread_name),
-            Err(e) => log::error!("failed to worker. {e}"),
+            Ok(_) => log::info!("stopped thread name: {}", self.thread_name),
+            Err(e) => log::error!("failed to thread. {e}"),
         }
     }
 }
