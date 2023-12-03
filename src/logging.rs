@@ -27,7 +27,7 @@ impl log::Log for Logger {
         }
 
         let binding = std::thread::current();
-        let thread_name = binding.name().unwrap_or_else(|| "-");
+        let thread_name = binding.name().unwrap_or("-");
 
         println!(
             "{} [{:<5}] [{}] {}",

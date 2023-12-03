@@ -14,7 +14,7 @@ impl threading::Worker for WorkerThread {
         log::info!("starting worker thread");
     }
 
-    fn handle_event(event: Self::Event) -> Result<(), WorkerError> {
+    fn handle_event(event: WorkerEvent) -> Result<(), WorkerError> {
         match event {
             WorkerEvent::TestA => log::info!("got event - a"),
             WorkerEvent::TestB => log::info!("got event - b"),

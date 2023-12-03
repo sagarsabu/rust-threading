@@ -46,7 +46,7 @@ where
             thread::Builder::new()
                 .name(self.thread_name.clone())
                 .spawn(move || Self::process_events(rx_channel_copy))
-                .map_err(|e| WorkerError::Io(e))?,
+                .map_err(WorkerError::Io)?,
         );
 
         Ok(())
