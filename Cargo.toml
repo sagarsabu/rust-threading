@@ -9,3 +9,4 @@ edition = "2021"
 chrono = "0.4.31"
 crossbeam-channel = "0.5.8"
 log = { version = "0.4.20", features = ["std"] }
+signal-hook = "0.3.17"

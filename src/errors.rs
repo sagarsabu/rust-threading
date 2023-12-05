@@ -1,6 +1,7 @@
 use std::{error, fmt};
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WorkerError {
     Io(std::io::Error),
     Any(String),
