@@ -1,25 +1,24 @@
 use signal_hook::consts;
-use std::sync::{self, atomic};
+use std::sync::{self, atomic, mpsc};
 
 use crate::threading;
 
 const SIGINT: usize = consts::SIGINT as usize;
 const SIGTERM: usize = consts::SIGTERM as usize;
 const SIGQUIT: usize = consts::SIGQUIT as usize;
-const SIGNALS: &[usize] = &[SIGINT, SIGQUIT, SIGTERM];
+const EXIT_SIGNALS: &[usize] = &[SIGINT, SIGQUIT, SIGTERM];
 
-#[derive(Clone)]
-pub struct SignalHandler<T>
+pub struct ExitHandler<F>
 where
-    T: threading::ThreadHandler,
+    F: Fn() + 'static + Sync + Send,
 {
-    main: sync::Arc<threading::SageThread<T>>,
     signal: sync::Arc<atomic::AtomicUsize>,
+    shutdown_callback: F,
 }
 
-impl<T> threading::ThreadHandler for SignalHandler<T>
+impl<F> threading::ThreadHandler for ExitHandler<F>
 where
-    T: threading::ThreadHandler,
+    F: Fn() + 'static + Sync + Send,
 {
     type HandlerEvent = ();
 
@@ -29,18 +28,15 @@ where
 
     fn stopping(&self) {
         log::info!("stopping signal handler. invoking shutdown callback");
-        self.main.stop();
+        (self.shutdown_callback)();
     }
 
-    fn process_events(
-        &self,
-        rx_channel: crossbeam_channel::Receiver<threading::ThreadEvent<Self>>,
-    ) {
+    fn process_events(&self, rx_channel: mpsc::Receiver<threading::ThreadEvent<Self>>) {
         log::info!("processing events started");
 
-        let delta = std::time::Duration::from_millis(100);
+        let delta = std::time::Duration::from_millis(20);
 
-        for sig in SIGNALS {
+        for sig in EXIT_SIGNALS {
             signal_hook::flag::register_usize(*sig as i32, self.signal.clone(), *sig)
                 .unwrap_or_else(|e| panic!("Failed to register signal: {}. err: {}", sig, e));
         }
@@ -56,11 +52,11 @@ where
                     threading::ThreadEvent::HandlerEvent(_) => {}
                 },
                 Err(recv_err) => match recv_err {
-                    crossbeam_channel::RecvTimeoutError::Disconnected => {
+                    mpsc::RecvTimeoutError::Disconnected => {
                         log::error!("rx_channel has disconnected");
                         break;
                     }
-                    crossbeam_channel::RecvTimeoutError::Timeout => {
+                    mpsc::RecvTimeoutError::Timeout => {
                         match self.signal.load(atomic::Ordering::Relaxed) {
                             0 => std::thread::sleep(delta),
                             sig @ (SIGINT | SIGTERM | SIGQUIT) => {
@@ -78,20 +74,14 @@ where
     }
 }
 
-impl<T> SignalHandler<T>
+impl<F> ExitHandler<F>
 where
-    T: threading::ThreadHandler,
+    F: Fn() + 'static + Sync + Send,
 {
-    pub fn new(main: sync::Arc<threading::SageThread<T>>) -> Self {
+    pub fn new(shutdown_callback: F) -> Self {
         Self {
-            main,
             signal: sync::Arc::<atomic::AtomicUsize>::new(0.into()),
+            shutdown_callback,
         }
-    }
-}
-
-pub fn wait_for_exit<T: threading::ThreadHandler>(signal_handler: &threading::SageThread<T>) {
-    while signal_handler.is_running() {
-        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

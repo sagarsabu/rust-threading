@@ -1,22 +1,21 @@
 use crate::errors::WorkerError;
-use crossbeam_channel::{Receiver, Sender};
 use std::{
-    sync::{atomic, Arc},
+    sync::{self, atomic, mpsc, Arc},
     thread,
 };
 
-pub trait ThreadHandler: 'static + Clone + Send + Sync {
-    type HandlerEvent: Send + Sync;
+pub trait ThreadHandler: 'static + Send + Sync {
+    type HandlerEvent: Send;
 
     fn starting(&self) {
-        log::info!("starting handler");
+        log::info!("default starting handler");
     }
 
     fn stopping(&self) {
-        log::info!("stopping handler");
+        log::info!("default stopping handler");
     }
 
-    fn process_events(&self, rx_channel: Receiver<ThreadEvent<Self>>) {
+    fn process_events(&self, rx_channel: mpsc::Receiver<ThreadEvent<Self>>) {
         log::info!("processing events started");
 
         for rx_event in rx_channel.iter() {
@@ -34,7 +33,7 @@ pub trait ThreadHandler: 'static + Clone + Send + Sync {
 
 pub enum ThreadEvent<T>
 where
-    T: ThreadHandler,
+    T: ThreadHandler + ?Sized,
 {
     HandlerEvent(T::HandlerEvent),
     Exit,
@@ -45,52 +44,58 @@ where
     T: ThreadHandler,
 {
     handler_name: String,
-    tx_channel: Sender<ThreadEvent<T>>,
-    rx_channel: Receiver<ThreadEvent<T>>,
-    handler: T,
-    join_handle: Option<thread::JoinHandle<()>>,
+    tx_channel: mpsc::Sender<ThreadEvent<T>>,
+    start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
+    join_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl<T> SageThread<T>
 where
     T: ThreadHandler,
 {
-    pub fn new<StrLike: AsRef<str>>(thread_name: StrLike, handler: T) -> Self {
+    pub fn new<StrLike: AsRef<str>>(thread_name: StrLike, handler: T) -> Result<Self, WorkerError> {
         log::info!("creating handler: '{}'", thread_name.as_ref());
 
-        let (tx_channel, rx_channel) = crossbeam_channel::unbounded();
+        let (tx_channel, rx_channel) = mpsc::channel();
 
-        Self {
+        let running = Arc::new(atomic::AtomicBool::new(false));
+        let running_cp = running.clone();
+
+        let start_barrier = Arc::new(sync::Barrier::new(2));
+        let start_barrier_cp = start_barrier.clone();
+
+        let join_handle = Some(
+            thread::Builder::new()
+                .name(thread_name.as_ref().to_owned())
+                .spawn(move || {
+                    start_barrier_cp.wait();
+
+                    running_cp.store(true, atomic::Ordering::Relaxed);
+
+                    handler.starting();
+                    handler.process_events(rx_channel);
+                    handler.stopping();
+
+                    running_cp.store(false, atomic::Ordering::Relaxed);
+                })
+                .map_err(WorkerError::Io)?,
+        );
+
+        Ok(Self {
             handler_name: thread_name.as_ref().to_owned(),
             tx_channel,
-            rx_channel,
-            handler,
-            join_handle: None,
-            running: Arc::new(false.into()),
-        }
+            join_handle,
+            running,
+            // Waiting from inside the thread and that start entry
+            start_barrier,
+        })
     }
 
-    pub fn start(&mut self) -> Result<(), WorkerError> {
-        log::info!("starting handler: '{}'", self.handler_name);
-
-        let rx_channel_copy = self.rx_channel.clone();
-        let handler_copy = self.handler.clone();
-        let running_copy = self.running.clone();
-        let join_handle = thread::Builder::new()
-            .name(self.handler_name.clone())
-            .spawn(move || {
-                running_copy.store(true, atomic::Ordering::Relaxed);
-                handler_copy.starting();
-                handler_copy.process_events(rx_channel_copy);
-                handler_copy.stopping();
-                running_copy.store(false, atomic::Ordering::Relaxed);
-            })
-            .map_err(WorkerError::Io)?;
-
-        self.join_handle = Some(join_handle);
-
-        Ok(())
+    pub fn start(&self) {
+        log::info!("dispatching start for handler: '{}'", self.handler_name);
+        // Fill up the barrier
+        self.start_barrier.wait();
     }
 
     pub fn stop(&self) {
@@ -139,12 +144,14 @@ where
     T: ThreadHandler,
 {
     fn drop(&mut self) {
+        log::info!("dropping handler: '{}'", self.handler_name);
+
         if self.is_running() {
             self.stop();
         }
 
-        if let Some(handle) = self.join_handle.take() {
-            match handle.join() {
+        if let Some(join_handle) = self.join_handle.take() {
+            match join_handle.join() {
                 Ok(_) => log::error!("joined thread for handler: '{}'", self.handler_name),
                 Err(e) => log::error!(
                     "failed to join thread for handler: '{}'. {:?}",
@@ -152,6 +159,11 @@ where
                     e
                 ),
             };
+        } else {
+            log::error!(
+                "join handle does not exist for handler: '{}'",
+                self.handler_name
+            );
         }
     }
 }
