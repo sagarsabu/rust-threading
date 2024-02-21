@@ -1,3 +1,5 @@
+use crate::errors::SageError;
+
 pub struct Logger {
     level: log::Level,
     level_filer: log::LevelFilter,
@@ -26,11 +28,11 @@ impl log::Log for Logger {
             return;
         }
 
-        let binding = std::thread::current();
-        let thread_name = binding.name().unwrap_or("-");
+        let current_thread = std::thread::current();
+        let thread_name = current_thread.name().unwrap_or("-");
 
         println!(
-            "{} [{:<5}] [{}] {}",
+            "{} [{:<5}] [{:<15}] {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S:%3f"),
             record.level(),
             thread_name,
@@ -41,4 +43,12 @@ impl log::Log for Logger {
     fn flush(&self) {
         // Noop
     }
+}
+
+pub fn setup_logger() -> Result<(), SageError> {
+    let logger = Box::new(Logger::new(log::Level::Debug));
+    log::set_max_level(logger.get_level_filter());
+    log::set_boxed_logger(logger).map_err(|e| SageError::Generic(e.to_string()))?;
+
+    Ok(())
 }
