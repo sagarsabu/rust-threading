@@ -25,16 +25,16 @@ enum ThreadEvent<T: ThreadHandler> {
 }
 
 pub struct SageThread<T: ThreadHandler> {
-    name: String,
+    pub name: String,
     tx_channel: mpsc::Sender<ThreadEvent<T>>,
     start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
-    join_handle: Option<thread::JoinHandle<()>>,
+    thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl<T: ThreadHandler> SageThread<T> {
-    pub fn new<StrLike: AsRef<str>>(name: StrLike, handler: T) -> Result<Self, SageError> {
-        log::info!("[{}] creating handler", name.as_ref());
+    pub fn new(name: &str, handler: T) -> Result<Self, SageError> {
+        log::info!("[{}] creating handler", name);
 
         let (tx_channel, rx_channel) = mpsc::channel();
 
@@ -44,27 +44,24 @@ impl<T: ThreadHandler> SageThread<T> {
         let start_barrier = Arc::new(sync::Barrier::new(2));
         let start_barrier_cp = start_barrier.clone();
 
-        let join_handle = Some(
-            thread::Builder::new()
-                .name(name.as_ref().to_owned())
-                .spawn(move || {
-                    start_barrier_cp.wait();
+        let handle = thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                start_barrier_cp.wait();
 
-                    running_cp.store(true, atomic::Ordering::Relaxed);
+                running_cp.store(true, atomic::Ordering::Relaxed);
 
-                    handler.starting();
-                    Self::process_events(&handler, rx_channel);
-                    handler.stopping();
+                handler.starting();
+                Self::process_events(&handler, rx_channel);
+                handler.stopping();
 
-                    running_cp.store(false, atomic::Ordering::Relaxed);
-                })
-                .map_err(SageError::Io)?,
-        );
+                running_cp.store(false, atomic::Ordering::Relaxed);
+            })?;
 
         Ok(Self {
-            name: name.as_ref().to_owned(),
+            name: name.to_string(),
             tx_channel,
-            join_handle,
+            thread_handle: Some(handle),
             running,
             // Waiting from inside the thread and the start entry
             start_barrier,
@@ -135,9 +132,9 @@ impl<T: ThreadHandler> Drop for SageThread<T> {
             self.stop();
         }
 
-        if let Some(join_handle) = self.join_handle.take() {
-            match join_handle.join() {
-                Ok(_) => log::error!("[{}] joined thread for handler", self.name),
+        if let Some(thread_handle) = self.thread_handle.take() {
+            match thread_handle.join() {
+                Ok(_) => log::info!("[{}] joined thread for handler", self.name),
                 Err(e) => log::error!("[{}] failed to join thread for handler. {:?}", self.name, e),
             };
         } else {

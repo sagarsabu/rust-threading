@@ -48,7 +48,7 @@ impl log::Log for Logger {
 pub fn setup_logger() -> Result<(), SageError> {
     let logger = Box::new(Logger::new(log::Level::Debug));
     log::set_max_level(logger.get_level_filter());
-    log::set_boxed_logger(logger).map_err(|e| SageError::Generic(e.to_string()))?;
+    log::set_boxed_logger(logger).map_err(SageError::to_generic)?;
 
     Ok(())
 }
