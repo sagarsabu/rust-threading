@@ -7,7 +7,8 @@ static SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(
 static SIGNAL_CV: std::sync::Condvar = std::sync::Condvar::new();
 
 fn signal_handler(signal: libc::c_int) {
-    log::info!("signal handler received signal: {}", signal);
+    let sig_str = unsafe { std::ffi::CStr::from_ptr(libc::strsignal(signal)) };
+    log::info!("signal handler received signal: {:?}", sig_str);
     SIGNAL.store(signal, Ordering::Relaxed);
     SIGNAL_CV.notify_one();
 }
@@ -31,7 +32,8 @@ where
 
     match SIGNAL.load(atomic::Ordering::Relaxed) {
         sig @ (libc::SIGINT | libc::SIGTERM | libc::SIGQUIT) => {
-            log::info!("caught signal: {}", sig);
+            let sig_str = unsafe { std::ffi::CStr::from_ptr(libc::strsignal(sig)) };
+            log::info!("caught signal: {:?}", sig_str);
         }
         unexpected_signal => panic!("Unexpected signal: {}", unexpected_signal),
     }

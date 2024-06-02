@@ -9,3 +9,4 @@ edition = "2021"
 chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 libc = "0.2"
+lazy_static = "1.4.0"

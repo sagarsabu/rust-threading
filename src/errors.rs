@@ -29,3 +29,15 @@ impl From<std::io::Error> for SageError {
         Self::Io(value)
     }
 }
+
+impl From<&str> for SageError {
+    fn from(value: &str) -> Self {
+        Self::Generic(value.to_string())
+    }
+}
+
+impl From<String> for SageError {
+    fn from(value: String) -> Self {
+        Self::Generic(value.to_string())
+    }
+}

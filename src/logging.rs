@@ -32,7 +32,7 @@ impl log::Log for Logger {
         let thread_name = current_thread.name().unwrap_or("-");
 
         println!(
-            "{} [{:<5}] [{:<15}] {}",
+            "{} [{:^7}] [{:^15}] {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S:%3f"),
             record.level(),
             thread_name,
@@ -46,7 +46,7 @@ impl log::Log for Logger {
 }
 
 pub fn setup_logger() -> Result<(), SageError> {
-    let logger = Box::new(Logger::new(log::Level::Debug));
+    let logger = Box::new(Logger::new(log::Level::Info));
     log::set_max_level(logger.get_level_filter());
     log::set_boxed_logger(logger).map_err(SageError::to_generic)?;
 
