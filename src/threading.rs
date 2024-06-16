@@ -57,7 +57,7 @@ where
         let running = Arc::new(atomic::AtomicBool::new(false));
         let exit_notifier = Arc::new((Mutex::new(false), Condvar::new()));
 
-        let mut thread = SageThread::<EventType> {
+        let thread = SageThread::<EventType> {
             name: name.to_string(),
             running: running.clone(),
             start_barrier: start_barrier.clone(),
@@ -69,18 +69,12 @@ where
         let handle = thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
-                thread.start_barrier.wait();
-                thread.running.store(true, atomic::Ordering::Release);
-
-                (start_handler_func)(&mut thread);
-
-                thread.process_events(rx_channel, event_handler_func);
-
-                (stop_handler_func)(&mut thread);
-
-                thread.stop_all_timers();
-
-                thread.running.store(false, atomic::Ordering::Release);
+                thread.thread_entry(
+                    rx_channel,
+                    event_handler_func,
+                    start_handler_func,
+                    stop_handler_func,
+                );
             })?;
 
         Ok(Self {
@@ -214,6 +208,31 @@ where
 {
     pub fn default_start(&mut self) {
         log::info!("starting thread name={}", self.name);
+    }
+
+    fn thread_entry<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
+        mut self,
+        rx_channel: mpsc::Receiver<ThreadEvent<EventType>>,
+        event_handler_func: EventHandlerFunc,
+        start_handler_func: StartHandlerFunc,
+        stop_handler_func: StopHandlerFunc,
+    ) where
+        EventHandlerFunc: Fn(&mut Self, EventType) + 'static + Send,
+        StartHandlerFunc: FnOnce(&mut Self) + 'static + Send,
+        StopHandlerFunc: FnOnce(&mut Self) + 'static + Send,
+    {
+        self.start_barrier.wait();
+        self.running.store(true, atomic::Ordering::Release);
+
+        (start_handler_func)(&mut self);
+
+        self.process_events(rx_channel, event_handler_func);
+
+        (stop_handler_func)(&mut self);
+
+        self.stop_all_timers();
+
+        self.running.store(false, atomic::Ordering::Release);
     }
 
     fn process_events<EventHandlerFunc>(
