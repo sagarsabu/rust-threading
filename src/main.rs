@@ -6,11 +6,15 @@ mod signal_handler;
 mod threading;
 mod timer;
 
-use crate::errors::SageError;
-use crate::threading::{SageHandler, SageThread};
-use crate::timer::{Timer, TimerType};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use crate::{
+    errors::SageError,
+    threading::{SageHandler, SageThread},
+    timer::{Timer, TimerType},
+};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 enum DispatchEvent {
     Dispatch,
@@ -21,32 +25,48 @@ enum WorkerEvent {
     TestB,
 }
 
+fn make_worker_threads(n_workers: usize) -> Result<Vec<SageHandler<WorkerEvent>>, SageError> {
+    let workers: Vec<SageHandler<WorkerEvent>> = (0..n_workers)
+        .map(|idx| {
+            SageHandler::new(
+                format!("worker-{}", idx + 1).as_str(),
+                |_thread, event: WorkerEvent| match event {
+                    WorkerEvent::TestA => log::info!("got event - a"),
+                    WorkerEvent::TestB => log::info!("got event - b"),
+                },
+                SageThread::default_start,
+                SageThread::default_stop,
+            )
+            .expect("Failed to create worker thread")
+        })
+        .collect();
+
+    Ok(workers)
+}
+
 fn main() -> Result<(), SageError> {
     logging::setup_logger()?;
     panic_handler::register_panic_handler();
 
-    let worker = Arc::new(SageHandler::new(
-        "worker",
-        |_thread, event: WorkerEvent| match event {
-            WorkerEvent::TestA => log::info!("got event - a"),
-            WorkerEvent::TestB => log::info!("got event - b"),
-        },
-        SageThread::default_start,
-        SageThread::default_stop,
-    )?);
-    worker.start();
+    let workers = Arc::new(make_worker_threads(10)?);
+    let workers_cp = workers.clone();
 
-    let worker_cp = worker.clone();
+    for worker in workers.iter() {
+        worker.start();
+    }
+
     let arc_timer_id = Arc::new(AtomicUsize::new(0));
     let arc_timer_id_start_cp = arc_timer_id.clone();
     let arc_timer_id_stop_cp = arc_timer_id.clone();
 
     let dispatcher = Arc::new(SageHandler::new(
-        "dispatch",
+        "dispatcher",
         move |_t, event: DispatchEvent| match event {
             DispatchEvent::Dispatch => {
-                worker.transmit_event(WorkerEvent::TestA);
-                worker.transmit_event(WorkerEvent::TestB)
+                for worker in workers.iter() {
+                    worker.transmit_event(WorkerEvent::TestA);
+                    worker.transmit_event(WorkerEvent::TestB);
+                }
             }
         },
         move |t| {
@@ -71,15 +91,18 @@ fn main() -> Result<(), SageError> {
 
     let dispatch_timer = Timer::new(
         "dispatcher",
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(20),
         TimerType::Periodic,
         move || dispatcher.transmit_event(DispatchEvent::Dispatch),
     )?;
     dispatch_timer.start()?;
 
     signal_handler::wait_for_exit(move || {
+        let _ = dispatch_timer.stop();
         dispatcher_cp.stop();
-        worker_cp.stop();
+        for worker in workers_cp.iter() {
+            worker.stop();
+        }
     });
 
     Ok(())

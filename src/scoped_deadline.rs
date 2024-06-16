@@ -6,7 +6,6 @@ pub struct ScopedDeadline {
     deadline: time::Duration,
 }
 
-#[allow(dead_code)]
 impl ScopedDeadline {
     pub fn new<T: AsRef<str>>(tag: T, deadline: time::Duration) -> Self {
         Self {
