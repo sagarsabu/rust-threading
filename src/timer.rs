@@ -2,26 +2,31 @@ use crate::errors::SageError;
 use std::{
     fmt::Display,
     io::Error,
-    sync::{atomic::Ordering, Arc, Condvar, Mutex, Once, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, Once, OnceLock,
+    },
     thread::JoinHandle,
 };
 
 type TimerCV = Arc<(Mutex<bool>, Condvar)>;
 pub type TimerId = usize;
-pub type TransmitCallbackType = Arc<dyn Fn() + 'static + Send + Sync>;
 pub type TimerCallbackType = Arc<dyn Fn() + 'static + Send + Sync>;
-pub type TimerCollection = std::collections::HashMap<TimerId, Arc<Mutex<Timer>>>;
+pub type TimerCollection = std::collections::HashMap<TimerId, Arc<Timer>>;
 
 static TIMER_TID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-// The signal handler. There's some real weird shit happening in here regarding memory access
-fn action_handler(
+extern "C" fn action_handler(
     _signal: libc::c_int,
     _signal_info: *mut libc::siginfo_t,
-    _user_data: *const libc::c_void,
+    _u_context: *const libc::c_void,
 ) {
     log::debug!("notifying timer thread");
-    let (_lock, cv) = &(**get_timer_cv());
+    let (_lock, cv) = &(**get_timer_condition_var());
+    unsafe {
+        let expired_ptr = (*_signal_info).si_value().sival_ptr as *mut AtomicBool;
+        *expired_ptr = true.into();
+    };
     cv.notify_one();
     log::debug!("notified timer thread");
 }
@@ -30,7 +35,9 @@ fn get_next_timer_id() -> TimerId {
     static mut TIMER_ID: OnceLock<TimerId> = OnceLock::new();
     let timer_id = unsafe {
         TIMER_ID.get_or_init(|| 0);
-        TIMER_ID.get_mut().unwrap()
+        TIMER_ID
+            .get_mut()
+            .expect("Failed to get mut ref to timer id")
     };
 
     if (*timer_id) >= TimerId::MAX - 1 {
@@ -41,7 +48,7 @@ fn get_next_timer_id() -> TimerId {
     *timer_id
 }
 
-fn get_timer_cv() -> &'static TimerCV {
+fn get_timer_condition_var() -> &'static TimerCV {
     static TIMER_CV: OnceLock<TimerCV> = OnceLock::new();
     TIMER_CV.get_or_init(|| TimerCV::new((Mutex::new(false), Condvar::new())))
 }
@@ -49,8 +56,10 @@ fn get_timer_cv() -> &'static TimerCV {
 fn get_all_timers() -> &'static mut TimerCollection {
     static mut TIMERS: OnceLock<TimerCollection> = OnceLock::new();
     unsafe {
-        TIMERS.get_or_init(|| TimerCollection::new());
-        TIMERS.get_mut().unwrap()
+        TIMERS.get_or_init(TimerCollection::new);
+        TIMERS
+            .get_mut()
+            .expect("Failed to get mut ref to timer collection")
     }
 }
 
@@ -63,11 +72,10 @@ pub enum TimerType {
 pub struct Timer {
     id: usize,
     name: String,
-    pub(self) last_expiry: std::time::Instant,
     pub(self) delta: std::time::Duration,
     pub(self) timer_type: TimerType,
-    pub(self) transmit_callback: TransmitCallbackType,
-    pub(self) running: bool,
+    pub(self) callback: TimerCallbackType,
+    pub(self) expired: Arc<AtomicBool>,
     inner: TimerInner,
 }
 
@@ -79,40 +87,40 @@ unsafe impl Send for TimerInner {}
 unsafe impl Sync for TimerInner {}
 
 impl Timer {
-    pub fn new<TxFunc>(
+    pub fn new<Func>(
         name: &str,
         delta: std::time::Duration,
         timer_type: TimerType,
-        transmit_callback: TxFunc,
-    ) -> Result<Arc<Mutex<Self>>, SageError>
+        timer_callback: Func,
+    ) -> Result<Arc<Self>, SageError>
     where
-        TxFunc: Fn() + 'static + Send + Sync,
+        Func: Fn() + 'static + Send + Sync,
     {
         spin_up_timer_thread();
 
         let mut this_timer = Self {
             id: get_next_timer_id(),
             name: name.to_owned(),
-            last_expiry: std::time::Instant::now(),
             delta,
             timer_type,
-            transmit_callback: Arc::from(transmit_callback),
-            running: false,
+            expired: Arc::new(AtomicBool::new(false)),
+            callback: Arc::from(timer_callback),
             inner: TimerInner {
                 timer_id: unsafe { std::mem::zeroed() },
             },
         };
-        log::info!("creating timer:{}", this_timer);
+
+        log::debug!("creating timer:{}", this_timer);
 
         let mut signal_event: libc::sigevent = unsafe { std::mem::zeroed() };
         signal_event.sigev_signo = libc::SIGRTMIN();
         signal_event.sigev_notify = libc::SIGEV_THREAD_ID;
-        signal_event.sigev_notify_thread_id = TIMER_TID.load(Ordering::SeqCst);
-        signal_event.sigev_value.sival_ptr = std::ptr::null_mut();
+        signal_event.sigev_notify_thread_id = TIMER_TID.load(Ordering::Relaxed);
+        signal_event.sigev_value.sival_ptr = this_timer.expired.as_ptr() as *mut libc::c_void;
 
         let mut signal_action: libc::sigaction = unsafe { std::mem::zeroed() };
         signal_action.sa_flags = libc::SA_SIGINFO;
-        signal_action.sa_sigaction = action_handler as usize;
+        signal_action.sa_sigaction = action_handler as libc::sighandler_t;
 
         unsafe {
             libc::sigemptyset(&mut signal_action.sa_mask);
@@ -135,71 +143,55 @@ impl Timer {
             }
         }
 
-        log::info!("created timer:{}", this_timer);
-        Ok(Arc::new(Mutex::new(this_timer)))
+        log::debug!("created timer:{}", this_timer);
+        Ok(Arc::new(this_timer))
     }
 
     pub fn get_id(&self) -> TimerId {
         self.id
     }
 
-    pub fn start(timer: &Arc<Mutex<Self>>) -> Result<(), SageError> {
-        let this_timer = &mut timer.lock().map_err(SageError::to_generic)?;
-
-        let seconds = this_timer.delta.as_secs() as i64;
-        let ns = this_timer.delta.subsec_nanos() as i64;
+    pub fn start(self: &Arc<Self>) -> Result<(), SageError> {
+        let seconds = self.delta.as_secs() as i64;
+        let ns = self.delta.subsec_nanos() as i64;
         unsafe {
             let mut timer_spec: libc::itimerspec = std::mem::zeroed();
             timer_spec.it_value.tv_sec = seconds;
             timer_spec.it_value.tv_nsec = ns;
-            timer_spec.it_interval.tv_sec = match this_timer.timer_type {
+            timer_spec.it_interval.tv_sec = match self.timer_type {
                 TimerType::FireOnce => 0,
                 TimerType::Periodic => seconds,
             };
-            timer_spec.it_interval.tv_nsec = match this_timer.timer_type {
+            timer_spec.it_interval.tv_nsec = match self.timer_type {
                 TimerType::FireOnce => 0,
                 TimerType::Periodic => ns,
             };
-            if libc::timer_settime(
-                this_timer.inner.timer_id,
-                0,
-                &timer_spec,
-                std::ptr::null_mut(),
-            ) == -1
+            if libc::timer_settime(self.inner.timer_id, 0, &timer_spec, std::ptr::null_mut()) == -1
             {
                 return Err(SageError::Io(Error::last_os_error()));
             }
         }
 
-        this_timer.running = true;
-        get_all_timers().insert(this_timer.id, timer.clone());
-        log::info!("started timer:{}", this_timer);
+        get_all_timers().insert(self.id, self.clone());
+        log::info!("started timer:{}", self);
         Ok(())
     }
 
-    pub fn stop(timer: &Arc<Mutex<Self>>) -> Result<(), SageError> {
-        let this_timer = &mut timer.lock().map_err(SageError::to_generic)?;
-
+    pub fn stop(self: &Arc<Self>) -> Result<(), SageError> {
         unsafe {
             let mut timer_spec: libc::itimerspec = std::mem::zeroed();
             timer_spec.it_interval.tv_sec = 0;
             timer_spec.it_interval.tv_nsec = 0;
             timer_spec.it_value.tv_sec = 0;
             timer_spec.it_value.tv_nsec = 0;
-            if libc::timer_settime(
-                this_timer.inner.timer_id,
-                0,
-                &timer_spec,
-                std::ptr::null_mut(),
-            ) == -1
+            if libc::timer_settime(self.inner.timer_id, 0, &timer_spec, std::ptr::null_mut()) == -1
             {
                 return Err(SageError::Io(Error::last_os_error()));
             }
         }
 
-        this_timer.running = false;
-        get_all_timers().remove(&this_timer.id);
-        log::info!("stopped timer:{}", this_timer);
+        get_all_timers().remove(&self.id);
+        log::info!("stopped timer:{}", self);
         Ok(())
     }
 }
@@ -223,7 +215,7 @@ impl Display for Timer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(id:{} name:'{}' type:'{}' period:{}us since-last-expiry:{}us)",
+            "(id:{} name:'{}' type:'{}' period:{}us)",
             self.id,
             self.name,
             match self.timer_type {
@@ -231,47 +223,33 @@ impl Display for Timer {
                 TimerType::Periodic => "Periodic",
             },
             self.delta.as_micros(),
-            self.last_expiry.elapsed().as_micros()
         )
     }
 }
 
 fn timer_thread_entry(start_barrier: Arc<std::sync::Barrier>) {
-    const DELTA_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_micros(250);
     TIMER_TID.store(unsafe { libc::gettid() }, Ordering::SeqCst);
     start_barrier.wait();
 
     log::info!("timer thread created");
-    let (lock, cv) = &(**get_timer_cv());
+    let (lock, cv) = &(**get_timer_condition_var());
     loop {
-        let _guard = cv.wait(lock.lock().unwrap()).unwrap();
-        let now = std::time::Instant::now();
-        log::info!("timer thread notified");
+        let _guard = cv
+            .wait(lock.lock().expect("Failed to lock timer thread CV"))
+            .expect("Failed to wait for timer thread CV");
 
-        for (_id, timer) in get_all_timers() {
-            match timer.lock() {
-                Ok(mut timer) => {
-                    let time_elapsed = now - timer.last_expiry;
-                    let expired = (time_elapsed >= timer.delta - DELTA_GRACE_PERIOD)
-                        || ((time_elapsed >= timer.delta - DELTA_GRACE_PERIOD)
-                            && (time_elapsed <= timer.delta + DELTA_GRACE_PERIOD));
-                    log::info!("timer thread invoking timer:{} expired:{}", timer, expired);
-                    assert!(expired == true);
+        log::debug!("timer thread notified");
 
-                    if timer.running && expired {
-                        log::info!("timer thread invoking timer:{}", timer);
-                        (timer.transmit_callback)();
-                        log::info!("timer thread invoked timer:{}", timer);
-                        timer.last_expiry = now;
-
-                        if timer.timer_type == TimerType::FireOnce {
-                            timer.running = false;
-                        }
-                    }
-                }
-
-                Err(e) => log::error!("failed to lock timer data. {}", e),
+        for timer in get_all_timers().values_mut() {
+            let expired = timer.expired.as_ref();
+            if !expired.load(Ordering::SeqCst) {
+                continue;
             }
+            expired.store(false, Ordering::SeqCst);
+
+            log::debug!("timer thread invoking timer:{}", timer);
+            (timer.callback)();
+            log::debug!("timer thread invoked timer:{}", timer);
         }
     }
 }
@@ -282,9 +260,12 @@ fn spin_up_timer_thread() {
         let start_barrier = Arc::new(std::sync::Barrier::new(2));
         let start_barrier_cp = start_barrier.clone();
         let _handle: JoinHandle<()> = std::thread::Builder::new()
-            .name("Timer".into())
+            .name("timer-thread".into())
             .spawn(move || timer_thread_entry(start_barrier_cp))
-            .unwrap();
+            .unwrap_or_else(|e| {
+                log::error!("failed to start timer thread. {}. exiting", e);
+                std::process::exit(1)
+            });
 
         start_barrier.wait();
     });

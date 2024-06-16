@@ -5,10 +5,11 @@ mod signal_handler;
 mod threading;
 mod timer;
 
-use std::sync::Arc;
-
 use crate::errors::SageError;
-use crate::threading::{SageThread, SageThreadControl};
+use crate::threading::{SageHandler, SageThread};
+use crate::timer::{Timer, TimerType};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 enum DispatchEvent {
     Dispatch,
@@ -22,7 +23,7 @@ enum WorkerEvent {
 fn main() -> Result<(), SageError> {
     logging::setup_logger()?;
 
-    let worker = SageThreadControl::new(
+    let worker = Arc::new(SageHandler::new(
         "worker",
         |_thread, event: WorkerEvent| match event {
             WorkerEvent::TestA => log::info!("got event - a"),
@@ -30,13 +31,15 @@ fn main() -> Result<(), SageError> {
         },
         SageThread::default_start,
         SageThread::default_stop,
-    )?;
+    )?);
     worker.start();
 
-    let worker = Arc::from(worker);
     let worker_cp = worker.clone();
+    let arc_timer_id = Arc::new(AtomicUsize::new(0));
+    let arc_timer_id_start_cp = arc_timer_id.clone();
+    let arc_timer_id_stop_cp = arc_timer_id.clone();
 
-    let dispatcher = SageThreadControl::new(
+    let dispatcher = Arc::new(SageHandler::new(
         "dispatch",
         move |_t, event: DispatchEvent| match event {
             DispatchEvent::Dispatch => {
@@ -44,34 +47,42 @@ fn main() -> Result<(), SageError> {
                 worker.transmit_event(WorkerEvent::TestB)
             }
         },
-        SageThread::default_start,
-        SageThread::default_stop,
-    )?;
-    dispatcher.start();
-
-    let dispatcher = Arc::from(dispatcher);
-    let dispatcher_cp = dispatcher.clone();
-    let t3 = SageThreadControl::new(
-        "trigger",
-        |_t, _event: ()| {},
-        |t| {
+        move |t| {
             let timer_id = t
                 .add_periodic_timer(
-                    "test",
-                    std::time::Duration::from_secs(1),
-                    Arc::new(move || dispatcher.transmit_event(DispatchEvent::Dispatch)),
+                    "test-periodic-timer",
+                    std::time::Duration::from_millis(200),
+                    || log::info!("timer for dispatcher triggered"),
                 )
                 .unwrap();
             t.start_timer(&timer_id).unwrap();
+            arc_timer_id_start_cp.store(timer_id, Ordering::Relaxed);
         },
-        SageThread::default_stop,
+        move |t| {
+            let timer_id = arc_timer_id_stop_cp.load(Ordering::Relaxed);
+            t.stop_timer(&timer_id).unwrap();
+        },
+    )?);
+    dispatcher.start();
+
+    let dispatcher_cp = dispatcher.clone();
+
+    let dispatch_timer = Timer::new(
+        "dispatcher",
+        std::time::Duration::from_secs(1),
+        TimerType::Periodic,
+        move || dispatcher.transmit_event(DispatchEvent::Dispatch),
     )?;
-    t3.start();
+    dispatch_timer.start()?;
 
     signal_handler::wait_for_exit(move || {
-        t3.stop();
+        let _ = Timer::start(&dispatch_timer);
         dispatcher_cp.stop();
         worker_cp.stop();
+
+        while worker_cp.is_running() || dispatcher_cp.is_running() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     });
 
     Ok(())

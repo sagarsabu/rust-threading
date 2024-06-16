@@ -1,23 +1,24 @@
+use crate::{
+    errors::SageError,
+    timer::{Timer, TimerCallbackType, TimerCollection, TimerId, TimerType},
+};
 use std::{
     sync::{self, atomic, mpsc, Arc},
     thread,
 };
 
-use crate::timer::{Timer, TimerCallbackType, TimerCollection, TimerId};
-use crate::{errors::SageError, timer::TimerType};
-
-enum ThreadEvent<E>
+enum ThreadEvent<EventType>
 where
-    E: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
-    HandlerEvent(E),
+    HandlerEvent(EventType),
     TimerEvent { callback: TimerCallbackType },
     Exit,
 }
 
-pub struct SageThreadControl<EventType>
+pub struct SageHandler<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     pub name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
@@ -26,9 +27,9 @@ where
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-impl<EventType> SageThreadControl<EventType>
+impl<EventType> SageHandler<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     pub fn new<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
         name: &str,
@@ -41,7 +42,7 @@ where
         StartHandlerFunc: FnOnce(&mut SageThread<EventType>) + 'static + Send,
         StopHandlerFunc: FnOnce(&mut SageThread<EventType>) + 'static + Send,
     {
-        log::info!("[{}] creating handler", name);
+        log::info!("creating handler: {}", name);
 
         let (tx_channel, rx_channel) = mpsc::channel();
         let start_barrier = Arc::new(sync::Barrier::new(2));
@@ -80,13 +81,13 @@ where
     }
 
     pub fn start(&self) {
-        log::info!("[{}] dispatching start for handler", self.name);
+        log::info!("dispatching start for handler={}", self.name);
         // Fill up the barrier
         self.start_barrier.wait();
     }
 
     pub fn stop(&self) {
-        log::info!("[{}] terminating handler", self.name);
+        log::info!("terminating handler={}", self.name);
 
         self.terminate();
     }
@@ -97,8 +98,8 @@ where
 
     pub fn transmit_event(&self, event: EventType) {
         match self.tx_channel.send(ThreadEvent::HandlerEvent(event)) {
-            Ok(_) => log::debug!("[{}] transmitted event to handler", self.name),
-            Err(e) => log::error!("[{}] failed to transmit event {} to handler", self.name, e),
+            Ok(_) => log::debug!("transmitted event to handler={}", self.name),
+            Err(e) => log::error!("failed to transmit event {} to handler={}", e, self.name),
         }
     }
 
@@ -111,27 +112,27 @@ where
             {
                 exit_attempt += 1;
                 log::error!(
-                    "[{}] failed to send exit event to handler. attempt: {}/{}. trying again.",
+                    "failed to send exit event to handler={}. attempt: {}/{}. trying again.",
                     self.name,
                     exit_attempt,
                     MAX_EXIT_ATTEMPTS
                 );
             }
         } else {
-            log::warn!("[{}] cannot stop handler that is not running", self.name);
+            log::warn!("cannot stop handler={} that is not running", self.name);
         }
     }
 }
 
-impl<EventType> Drop for SageThreadControl<EventType>
+impl<EventType> Drop for SageHandler<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     fn drop(&mut self) {
-        log::info!("[{}] dropping handler", self.name);
+        log::info!("dropping handler={}", self.name);
 
         if !self.is_running() {
-            log::warn!("[{}] dropping handler that is not running", self.name);
+            log::warn!("dropping handler={} that is not running", self.name);
             return;
         }
 
@@ -139,18 +140,18 @@ where
 
         if let Some(thread_handle) = self.thread_handle.take() {
             match thread_handle.join() {
-                Ok(_) => log::info!("[{}] joined thread for handler", self.name),
-                Err(e) => log::error!("[{}] failed to join thread for handler. {:?}", self.name, e),
+                Ok(_) => log::info!("joined thread for handler={}", self.name),
+                Err(e) => log::error!("failed to join thread for handler={}. {:?}", self.name, e),
             };
         } else {
-            log::error!("[{}] join handle does not exist for handler", self.name);
+            log::error!("join handle does not exist for handler={}", self.name);
         }
     }
 }
 
 pub struct SageThread<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
@@ -161,7 +162,7 @@ where
 
 impl<EventType> SageThread<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     pub fn default_start(&mut self) {
         log::info!("starting thread");
@@ -174,7 +175,7 @@ where
     ) where
         EventHandlerFunc: Fn(&mut Self, EventType) + 'static + Send,
     {
-        log::info!("processing events started for name:{}", self.name);
+        log::info!("processing events started for name={}", self.name);
 
         for rx_event in rx_channel.iter() {
             match rx_event {
@@ -193,27 +194,26 @@ where
         log::info!("stopping thread");
     }
 
-    pub fn add_periodic_timer(
+    pub fn add_periodic_timer<F: Fn() + 'static + Send + Sync>(
         &mut self,
         name: &str,
         delta: std::time::Duration,
-        callback: TimerCallbackType,
+        callback: F,
     ) -> Result<TimerId, SageError> {
         let tx_channel_cp = self.tx_channel.clone();
+        let cb: Arc<dyn Fn() + 'static + Send + Sync> = Arc::new(callback);
         let name_cp = self.name.clone();
-        let timer = Timer::new(
-            name,
-            delta,
-            TimerType::Periodic,
-            move || match tx_channel_cp.send(ThreadEvent::TimerEvent {
-                callback: callback.clone(),
-            }) {
-                Ok(_) => log::debug!("[{}] transmitted timer event to handler", name_cp),
+        let timer = Timer::new(name, delta, TimerType::Periodic, move || {
+            let event = ThreadEvent::<EventType>::TimerEvent {
+                callback: cb.clone(),
+            };
+            match tx_channel_cp.send(event) {
+                Ok(_) => log::debug!("transmitted timer event to handler={}", name_cp),
                 Err(e) => log::error!("{}", e),
-            },
-        )?;
+            }
+        })?;
 
-        let timer_id = { timer.lock().map_err(SageError::to_generic)?.get_id() };
+        let timer_id = timer.get_id();
         self.timers.insert(timer_id, timer);
 
         Ok(timer_id)
@@ -227,7 +227,7 @@ where
             )
         })?;
 
-        Timer::start(timer)?;
+        timer.start()?;
         Ok(())
     }
 
@@ -237,21 +237,26 @@ where
             .get(timer_id)
             .ok_or_else(|| format!("Cannot stop timer with id={} that does not exist", timer_id))?;
 
-        Timer::stop(timer)?;
+        timer.stop()?;
         Ok(())
     }
 }
 
 impl<EventType> Drop for SageThread<EventType>
 where
-    EventType: Send + 'static,
+    EventType: 'static + Send + Sync,
 {
     fn drop(&mut self) {
         log::info!("dropping thread");
         for (timer_id, timer) in self.timers.iter() {
             match Timer::stop(timer) {
-                Ok(_) => log::debug!("[{}] timer-id:{} stopped", self.name, timer_id),
-                Err(e) => log::error!("[{}] failed to stop timer-id:{} {}", self.name, timer_id, e),
+                Ok(_) => log::debug!("timer-id={} for handler={} stopped", timer_id, self.name),
+                Err(e) => log::error!(
+                    "failed to stop timer-id={} handler={} {}",
+                    timer_id,
+                    self.name,
+                    e
+                ),
             }
         }
     }
