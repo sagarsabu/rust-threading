@@ -216,14 +216,14 @@ impl Display for Timer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(id:{} name:'{}' type:'{}' period:{}us)",
+            "(id:{} name:'{}' type:'{}' period:{:?})",
             self.id,
             self.name,
             match self.timer_type {
                 TimerType::FireOnce => "FireOnce",
                 TimerType::Periodic => "Periodic",
             },
-            self.delta.as_micros(),
+            self.delta,
         )
     }
 }

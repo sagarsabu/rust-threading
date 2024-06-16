@@ -3,7 +3,11 @@ use crate::{
     timer::{Timer, TimerCallbackType, TimerCollection, TimerId, TimerType},
 };
 use std::{
-    sync::{self, atomic, mpsc, Arc},
+    sync::{
+        self,
+        atomic::{self, Ordering},
+        mpsc, Arc, Condvar, Mutex,
+    },
     thread,
 };
 
@@ -16,6 +20,8 @@ where
     Exit,
 }
 
+type ExitCV = (Mutex<bool>, Condvar);
+
 pub struct SageHandler<EventType>
 where
     EventType: 'static + Send + Sync,
@@ -23,8 +29,9 @@ where
     pub name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
     start_barrier: Arc<sync::Barrier>,
-    stop_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
+    exit_notifier: Arc<ExitCV>,
+    stop_requested: Arc<atomic::AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -47,14 +54,14 @@ where
 
         let (tx_channel, rx_channel) = mpsc::channel();
         let start_barrier = Arc::new(sync::Barrier::new(2));
-        let stop_barrier = Arc::new(sync::Barrier::new(2));
         let running = Arc::new(atomic::AtomicBool::new(false));
+        let exit_notifier = Arc::new((Mutex::new(false), Condvar::new()));
 
         let mut thread = SageThread::<EventType> {
             name: name.to_string(),
             running: running.clone(),
             start_barrier: start_barrier.clone(),
-            stop_barrier: stop_barrier.clone(),
+            exit_notifier: exit_notifier.clone(),
             tx_channel: tx_channel.clone(),
             timers: TimerCollection::new(),
         };
@@ -63,7 +70,7 @@ where
             .name(name.to_string())
             .spawn(move || {
                 thread.start_barrier.wait();
-                thread.running.store(true, atomic::Ordering::SeqCst);
+                thread.running.store(true, atomic::Ordering::Release);
 
                 (start_handler_func)(&mut thread);
 
@@ -73,15 +80,15 @@ where
 
                 thread.stop_all_timers();
 
-                thread.running.store(false, atomic::Ordering::SeqCst);
-                thread.stop_barrier.wait();
+                thread.running.store(false, atomic::Ordering::Release);
             })?;
 
         Ok(Self {
             name: name.to_string(),
             running,
             start_barrier,
-            stop_barrier,
+            exit_notifier,
+            stop_requested: Arc::new(false.into()),
             thread_handle: Some(handle),
             tx_channel,
         })
@@ -94,12 +101,15 @@ where
     }
 
     pub fn stop(&self) {
-        log::info!("terminating handler={}", self.name);
-        self.terminate();
+        if !self.stop_requested.load(Ordering::Relaxed) {
+            log::info!("terminating handler={}", self.name);
+            self.terminate();
+            self.stop_requested.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn is_running(&self) -> bool {
-        self.running.load(atomic::Ordering::Relaxed)
+        self.running.load(atomic::Ordering::Acquire)
     }
 
     pub fn transmit_event(&self, event: EventType) {
@@ -127,13 +137,8 @@ where
                     MAX_EXIT_ATTEMPTS
                 );
             } else {
-                self.stop_barrier.wait();
                 break;
             }
-        }
-
-        if self.is_running() {
-            log::error!("failed to terminate handler={}", self.name);
         }
     }
 }
@@ -143,17 +148,50 @@ where
     EventType: 'static + Send + Sync,
 {
     fn drop(&mut self) {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+
         log::info!("dropping handler={}", self.name);
 
         self.stop();
 
-        if let Some(thread_handle) = self.thread_handle.take() {
-            match thread_handle.join() {
-                Ok(_) => log::info!("joined thread for handler={}", self.name),
-                Err(e) => log::error!("failed to join thread for handler={}. {:?}", self.name, e),
-            };
+        let (lock, cv) = &(*self.exit_notifier);
+
+        if let Ok(lock_guard) = lock.lock() {
+            match cv.wait_timeout_while(lock_guard, DEADLINE, |exit_acknowledged| {
+                !*exit_acknowledged
+            }) {
+                Ok((_lock_guard, wait_res)) => {
+                    if wait_res.timed_out() {
+                        log::error!(
+                            "thread handler={} was not notified of exit within deadline={:?}",
+                            self.name,
+                            DEADLINE
+                        );
+                        return;
+                    }
+
+                    if let Some(thread_handle) = self.thread_handle.take() {
+                        match thread_handle.join() {
+                            Ok(_) => log::info!("joined thread for handler={}", self.name),
+                            Err(e) => log::error!(
+                                "failed to join thread for handler={}. {:?}",
+                                self.name,
+                                e
+                            ),
+                        };
+                    } else {
+                        log::error!("join handle does not exist for handler={}", self.name);
+                    }
+                }
+
+                Err(e) => log::error!(
+                    "failed to lock exit cv when waiting in exit cv for handler={} {}",
+                    self.name,
+                    e
+                ),
+            }
         } else {
-            log::error!("join handle does not exist for handler={}", self.name);
+            log::error!("failed to lock exit cv when dropping handler={}", self.name,)
         }
     }
 }
@@ -165,7 +203,7 @@ where
     name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
     start_barrier: Arc<sync::Barrier>,
-    stop_barrier: Arc<sync::Barrier>,
+    exit_notifier: Arc<ExitCV>,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
 }
@@ -193,7 +231,17 @@ where
                 ThreadEvent::TimerEvent { callback } => {
                     (callback)();
                 }
-                ThreadEvent::Exit => break,
+                ThreadEvent::Exit => {
+                    log::info!("received exit event. notifying handler and exiting thread.");
+                    let (lock, cv) = &*self.exit_notifier;
+                    if let Ok(mut lock_guard) = lock.lock() {
+                        *lock_guard = true;
+                        cv.notify_one();
+                    } else {
+                        log::error!("failed to lock exit cv on exit event");
+                    }
+                    break;
+                }
             }
         }
 

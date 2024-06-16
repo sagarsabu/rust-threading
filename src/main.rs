@@ -81,10 +81,6 @@ fn main() -> Result<(), SageError> {
         let _ = dispatch_timer.stop();
         dispatcher_cp.stop();
         worker_cp.stop();
-
-        while worker_cp.is_running() || dispatcher_cp.is_running() {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
     });
 
     Ok(())
