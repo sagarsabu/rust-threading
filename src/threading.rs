@@ -23,6 +23,7 @@ where
     pub name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
     start_barrier: Arc<sync::Barrier>,
+    stop_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -46,12 +47,14 @@ where
 
         let (tx_channel, rx_channel) = mpsc::channel();
         let start_barrier = Arc::new(sync::Barrier::new(2));
+        let stop_barrier = Arc::new(sync::Barrier::new(2));
         let running = Arc::new(atomic::AtomicBool::new(false));
 
         let mut thread = SageThread::<EventType> {
             name: name.to_string(),
             running: running.clone(),
             start_barrier: start_barrier.clone(),
+            stop_barrier: stop_barrier.clone(),
             tx_channel: tx_channel.clone(),
             timers: TimerCollection::new(),
         };
@@ -60,7 +63,7 @@ where
             .name(name.to_string())
             .spawn(move || {
                 thread.start_barrier.wait();
-                thread.running.store(true, atomic::Ordering::Relaxed);
+                thread.running.store(true, atomic::Ordering::SeqCst);
 
                 (start_handler_func)(&mut thread);
 
@@ -68,13 +71,17 @@ where
 
                 (stop_handler_func)(&mut thread);
 
-                thread.running.store(false, atomic::Ordering::Relaxed);
+                thread.stop_all_timers();
+
+                thread.running.store(false, atomic::Ordering::SeqCst);
+                thread.stop_barrier.wait();
             })?;
 
         Ok(Self {
             name: name.to_string(),
-            running: running.clone(),
-            start_barrier: start_barrier.clone(),
+            running,
+            start_barrier,
+            stop_barrier,
             thread_handle: Some(handle),
             tx_channel,
         })
@@ -88,7 +95,6 @@ where
 
     pub fn stop(&self) {
         log::info!("terminating handler={}", self.name);
-
         self.terminate();
     }
 
@@ -105,21 +111,29 @@ where
 
     fn terminate(&self) {
         const MAX_EXIT_ATTEMPTS: u8 = 5;
-        if self.is_running() {
-            let mut exit_attempt = 0u8;
-            while self.tx_channel.send(ThreadEvent::Exit).is_err()
-                && exit_attempt <= MAX_EXIT_ATTEMPTS
-            {
+        let mut exit_attempt = 0u8;
+
+        while exit_attempt <= MAX_EXIT_ATTEMPTS {
+            if !self.is_running() {
+                break;
+            }
+
+            if self.tx_channel.send(ThreadEvent::Exit).is_err() {
                 exit_attempt += 1;
-                log::error!(
+                log::warn!(
                     "failed to send exit event to handler={}. attempt: {}/{}. trying again.",
                     self.name,
                     exit_attempt,
                     MAX_EXIT_ATTEMPTS
                 );
+            } else {
+                self.stop_barrier.wait();
+                break;
             }
-        } else {
-            log::warn!("cannot stop handler={} that is not running", self.name);
+        }
+
+        if self.is_running() {
+            log::error!("failed to terminate handler={}", self.name);
         }
     }
 }
@@ -130,11 +144,6 @@ where
 {
     fn drop(&mut self) {
         log::info!("dropping handler={}", self.name);
-
-        if !self.is_running() {
-            log::warn!("dropping handler={} that is not running", self.name);
-            return;
-        }
 
         self.stop();
 
@@ -156,6 +165,7 @@ where
     name: String,
     tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
     start_barrier: Arc<sync::Barrier>,
+    stop_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
 }
@@ -165,7 +175,7 @@ where
     EventType: 'static + Send + Sync,
 {
     pub fn default_start(&mut self) {
-        log::info!("starting thread");
+        log::info!("starting thread name={}", self.name);
     }
 
     fn process_events<EventHandlerFunc>(
@@ -191,7 +201,7 @@ where
     }
 
     pub fn default_stop(&mut self) {
-        log::info!("stopping thread");
+        log::info!("stopping thread name={}", self.name);
     }
 
     pub fn add_periodic_timer<F: Fn() + 'static + Send + Sync>(
@@ -240,14 +250,8 @@ where
         timer.stop()?;
         Ok(())
     }
-}
 
-impl<EventType> Drop for SageThread<EventType>
-where
-    EventType: 'static + Send + Sync,
-{
-    fn drop(&mut self) {
-        log::info!("dropping thread");
+    fn stop_all_timers(&self) {
         for (timer_id, timer) in self.timers.iter() {
             match Timer::stop(timer) {
                 Ok(_) => log::debug!("timer-id={} for handler={} stopped", timer_id, self.name),
@@ -259,5 +263,14 @@ where
                 ),
             }
         }
+    }
+}
+
+impl<EventType> Drop for SageThread<EventType>
+where
+    EventType: 'static + Send + Sync,
+{
+    fn drop(&mut self) {
+        log::info!("dropping thread name={}", self.name);
     }
 }
