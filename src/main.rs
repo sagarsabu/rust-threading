@@ -1,5 +1,6 @@
 mod errors;
 mod logging;
+mod panic_handler;
 mod scoped_deadline;
 mod signal_handler;
 mod threading;
@@ -22,6 +23,7 @@ enum WorkerEvent {
 
 fn main() -> Result<(), SageError> {
     logging::setup_logger()?;
+    panic_handler::register_panic_handler();
 
     let worker = Arc::new(SageHandler::new(
         "worker",

@@ -46,25 +46,21 @@ where
             std::time::Duration::from_millis(200),
             TimerType::FireOnce,
             || {
-                log::error!("shutdown deadline exceeded. terminating...");
-                std::process::exit(1);
+                panic!("shutdown deadline exceeded. terminating...");
             },
         )
         .unwrap_or_else(|e| {
-            log::error!("failed to create shutdown timer. {}. exiting", e);
-            std::process::exit(1);
+            panic!("failed to create shutdown timer. {}. exiting", e);
         });
 
         shutdown_timer.start().unwrap_or_else(|e| {
-            log::error!("failed to start shutdown timer. {}. exiting", e);
-            std::process::exit(1);
+            panic!("failed to start shutdown timer. {}. exiting", e);
         });
 
         shutdown_callback();
 
         shutdown_timer.stop().unwrap_or_else(|e| {
-            log::error!("failed to stop shutdown timer. {}. exiting", e);
-            std::process::exit(1);
+            panic!("failed to stop shutdown timer. {}. exiting", e);
         });
     }
 }

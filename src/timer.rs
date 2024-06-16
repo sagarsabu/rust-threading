@@ -83,6 +83,7 @@ struct TimerInner {
     timer_id: libc::timer_t,
 }
 
+// FFI is inherently unsafe
 unsafe impl Send for TimerInner {}
 unsafe impl Sync for TimerInner {}
 
@@ -262,10 +263,7 @@ fn spin_up_timer_thread() {
         let _handle: JoinHandle<()> = std::thread::Builder::new()
             .name("timer-thread".into())
             .spawn(move || timer_thread_entry(start_barrier_cp))
-            .unwrap_or_else(|e| {
-                log::error!("failed to start timer thread. {}. exiting", e);
-                std::process::exit(1)
-            });
+            .expect("Failed to start timer thread");
 
         start_barrier.wait();
     });
