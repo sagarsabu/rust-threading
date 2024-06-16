@@ -1,5 +1,6 @@
 use crate::{
     errors::SageError,
+    scoped_deadline::ScopedDeadline,
     timer::{Timer, TimerCallbackType, TimerCollection, TimerId, TimerType},
 };
 use std::{
@@ -246,8 +247,18 @@ where
 
         for rx_event in rx_channel.iter() {
             match rx_event {
-                ThreadEvent::HandlerEvent(handler_event) => event_handler_func(self, handler_event),
+                ThreadEvent::HandlerEvent(handler_event) => {
+                    let _dl = ScopedDeadline::new(
+                        format!("handle-event-dl-{}", self.name),
+                        std::time::Duration::from_millis(100),
+                    );
+                    event_handler_func(self, handler_event);
+                }
                 ThreadEvent::TimerEvent { callback } => {
+                    let _dl = ScopedDeadline::new(
+                        format!("timer-event-dl-{}", self.name),
+                        std::time::Duration::from_millis(100),
+                    );
                     (callback)();
                 }
                 ThreadEvent::Exit => {

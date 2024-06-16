@@ -78,7 +78,6 @@ fn main() -> Result<(), SageError> {
     dispatch_timer.start()?;
 
     signal_handler::wait_for_exit(move || {
-        let _ = dispatch_timer.stop();
         dispatcher_cp.stop();
         worker_cp.stop();
     });

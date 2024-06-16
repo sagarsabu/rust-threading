@@ -1,4 +1,4 @@
-use crate::errors::SageError;
+use crate::{errors::SageError, scoped_deadline::ScopedDeadline};
 use std::{
     fmt::Display,
     io::Error,
@@ -174,7 +174,7 @@ impl Timer {
         }
 
         get_all_timers().insert(self.id, self.clone());
-        log::info!("started timer:{}", self);
+        log::debug!("started timer:{}", self);
         Ok(())
     }
 
@@ -192,7 +192,7 @@ impl Timer {
         }
 
         get_all_timers().remove(&self.id);
-        log::info!("stopped timer:{}", self);
+        log::debug!("stopped timer:{}", self);
         Ok(())
     }
 }
@@ -208,7 +208,7 @@ impl Drop for Timer {
             );
         }
 
-        log::info!("dropped timer:{}", self);
+        log::debug!("dropped timer:{}", self);
     }
 }
 
@@ -248,9 +248,13 @@ fn timer_thread_entry(start_barrier: Arc<std::sync::Barrier>) {
             }
             expired.store(false, Ordering::SeqCst);
 
-            log::debug!("timer thread invoking timer:{}", timer);
-            (timer.callback)();
-            log::debug!("timer thread invoked timer:{}", timer);
+            {
+                let _dl = ScopedDeadline::new(
+                    format!("timer-cb-dl-{}", timer.name),
+                    std::time::Duration::from_millis(100),
+                );
+                (timer.callback)();
+            }
         }
     }
 }
