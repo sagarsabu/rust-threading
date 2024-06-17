@@ -1,4 +1,7 @@
-use crate::timer::{Timer, TimerType};
+use crate::{
+    errors::ErrorWrap,
+    timer::{Timer, TimerType},
+};
 use std::sync::{
     atomic::{self, Ordering},
     Mutex,
@@ -16,7 +19,7 @@ fn signal_handler(signal: libc::c_int) {
 
 pub fn wait_for_exit<F>(shutdown_callback: F)
 where
-    F: FnOnce(),
+    F: FnOnce() -> Result<(), ErrorWrap>,
 {
     const EXIT_SIGNALS: &[libc::c_int] = &[libc::SIGINT, libc::SIGTERM, libc::SIGQUIT];
 
@@ -50,17 +53,19 @@ where
             },
         )
         .unwrap_or_else(|e| {
-            panic!("failed to create shutdown timer. {}. exiting", e);
+            panic!("failed to create shutdown timer. {}. aborting", e);
         });
 
         shutdown_timer.start().unwrap_or_else(|e| {
-            panic!("failed to start shutdown timer. {}. exiting", e);
+            panic!("failed to start shutdown timer. {}. aborting", e);
         });
 
-        shutdown_callback();
+        shutdown_callback().unwrap_or_else(|e| {
+            panic!("shutdown trigger failed. {}. aborting", e);
+        });
 
         shutdown_timer.stop().unwrap_or_else(|e| {
-            panic!("failed to stop shutdown timer. {}. exiting", e);
+            panic!("failed to stop shutdown timer. {}. aborting", e);
         });
     }
 }

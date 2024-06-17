@@ -12,23 +12,23 @@ use std::{
     thread,
 };
 
-enum Event<Type>
+enum Event<HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    HandlerEvent: 'static + Send,
 {
-    HandlerEvent(Type),
-    TimerEvent { callback: TimerCallback },
+    Handler(HandlerEvent),
+    Timer { callback: TimerCallback },
     Exit,
 }
 
 type ExitCV = Arc<(Mutex<bool>, Condvar)>;
 
-pub struct ThreadHandler<Type>
+pub struct ThreadHandler<HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    HandlerEvent: 'static + Send,
 {
     name: String,
-    tx_channel: mpsc::Sender<Event<Type>>,
+    tx_channel: mpsc::Sender<Event<HandlerEvent>>,
     start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
     exit_notifier: ExitCV,
@@ -36,20 +36,28 @@ where
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-impl<Type> ThreadHandler<Type>
+impl<HandlerEvent> ThreadHandler<HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    HandlerEvent: 'static + Send,
 {
-    pub fn new<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
+    pub fn new<ThreadData, ThreadDataMaker, EventHandler, StartHandler, StopHandler>(
         name: &str,
-        event_handler_func: EventHandlerFunc,
-        start_handler_func: StartHandlerFunc,
-        stop_handler_func: StopHandlerFunc,
+        data_maker: ThreadDataMaker,
+        event_handler: EventHandler,
+        start_handler: StartHandler,
+        stop_handler: StopHandler,
     ) -> Result<Self, ErrorWrap>
     where
-        EventHandlerFunc: Fn(&mut ThreadExecutor<Type>, Type) + 'static + Send,
-        StartHandlerFunc: FnOnce(&mut ThreadExecutor<Type>) + 'static + Send,
-        StopHandlerFunc: FnOnce(&mut ThreadExecutor<Type>) + 'static + Send,
+        ThreadData: 'static + Send,
+        ThreadDataMaker: FnOnce() -> ThreadData,
+        EventHandler:
+            Fn(&mut ThreadExecutor<ThreadData, HandlerEvent>, HandlerEvent) + 'static + Send,
+        StartHandler: FnOnce(&mut ThreadExecutor<ThreadData, HandlerEvent>) -> Result<(), ErrorWrap>
+            + 'static
+            + Send,
+        StopHandler: FnOnce(&mut ThreadExecutor<ThreadData, HandlerEvent>) -> Result<(), ErrorWrap>
+            + 'static
+            + Send,
     {
         log::info!("creating handler: {}", name);
 
@@ -58,8 +66,9 @@ where
         let running = Arc::new(atomic::AtomicBool::new(false));
         let exit_notifier = ExitCV::new((Mutex::new(false), Condvar::new()));
 
-        let thread = ThreadExecutor::<Type> {
+        let thread = ThreadExecutor::<ThreadData, HandlerEvent> {
             name: name.to_string(),
+            data: data_maker(),
             running: running.clone(),
             start_barrier: start_barrier.clone(),
             exit_notifier: exit_notifier.clone(),
@@ -70,12 +79,7 @@ where
         let handle = thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
-                thread.thread_entry(
-                    rx_channel,
-                    event_handler_func,
-                    start_handler_func,
-                    stop_handler_func,
-                );
+                thread.thread_entry(rx_channel, event_handler, start_handler, stop_handler);
             })?;
 
         Ok(Self {
@@ -107,8 +111,8 @@ where
         self.running.load(atomic::Ordering::Acquire)
     }
 
-    pub fn transmit_event(&self, event: Type) {
-        match self.tx_channel.send(Event::HandlerEvent(event)) {
+    pub fn transmit_event(&self, event: HandlerEvent) {
+        match self.tx_channel.send(Event::Handler(event)) {
             Ok(_) => log::debug!("transmitted event to handler={}", self.name),
             Err(e) => log::error!("failed to transmit event {} to handler={}", e, self.name),
         }
@@ -138,9 +142,9 @@ where
     }
 }
 
-impl<Type> Drop for ThreadHandler<Type>
+impl<HandlerEvent> Drop for ThreadHandler<HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    HandlerEvent: 'static + Send,
 {
     fn drop(&mut self) {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
@@ -191,57 +195,65 @@ where
     }
 }
 
-pub struct ThreadExecutor<Type>
+pub struct ThreadExecutor<Data, HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    Data: 'static + Send,
+    HandlerEvent: 'static + Send,
 {
-    name: String,
-    tx_channel: mpsc::Sender<Event<Type>>,
+    pub name: String,
+    pub data: Data,
+    tx_channel: mpsc::Sender<Event<HandlerEvent>>,
     start_barrier: Arc<sync::Barrier>,
     exit_notifier: ExitCV,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
 }
 
-impl<Type> ThreadExecutor<Type>
+impl<Data, HandlerEvent> ThreadExecutor<Data, HandlerEvent>
 where
-    Type: 'static + Send + Sync,
+    Data: 'static + Send,
+    HandlerEvent: 'static + Send,
 {
-    pub fn default_start(&mut self) {
+    pub fn default_start(&mut self) -> Result<(), ErrorWrap> {
         log::info!("starting thread name={}", self.name);
+        Ok(())
     }
 
-    fn thread_entry<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
+    fn thread_entry<EventHandler, StartHandler, StopHandler>(
         mut self,
-        rx_channel: mpsc::Receiver<Event<Type>>,
-        event_handler_func: EventHandlerFunc,
-        start_handler_func: StartHandlerFunc,
-        stop_handler_func: StopHandlerFunc,
+        rx_channel: mpsc::Receiver<Event<HandlerEvent>>,
+        event_handler: EventHandler,
+        start_handler: StartHandler,
+        stop_handler: StopHandler,
     ) where
-        EventHandlerFunc: Fn(&mut Self, Type) + 'static + Send,
-        StartHandlerFunc: FnOnce(&mut Self) + 'static + Send,
-        StopHandlerFunc: FnOnce(&mut Self) + 'static + Send,
+        EventHandler: Fn(&mut Self, HandlerEvent) + 'static + Send,
+        StartHandler: FnOnce(&mut Self) -> Result<(), ErrorWrap> + 'static + Send,
+        StopHandler: FnOnce(&mut Self) -> Result<(), ErrorWrap> + 'static + Send,
     {
         self.start_barrier.wait();
         self.running.store(true, atomic::Ordering::Release);
 
-        (start_handler_func)(&mut self);
+        if let Err(e) = (start_handler)(&mut self) {
+            log::error!("error encountered during start action. {}", e);
+        }
 
-        self.process_events(rx_channel, event_handler_func);
+        self.process_events(rx_channel, event_handler);
 
-        (stop_handler_func)(&mut self);
+        if let Err(e) = (stop_handler)(&mut self) {
+            log::error!("error encountered during stop action. {}", e);
+        }
 
         self.stop_all_timers();
 
         self.running.store(false, atomic::Ordering::Release);
     }
 
-    fn process_events<EventHandlerFunc>(
+    fn process_events<EventHandler>(
         &mut self,
-        rx_channel: mpsc::Receiver<Event<Type>>,
-        event_handler_func: EventHandlerFunc,
+        rx_channel: mpsc::Receiver<Event<HandlerEvent>>,
+        event_handler: EventHandler,
     ) where
-        EventHandlerFunc: Fn(&mut Self, Type) + 'static + Send,
+        EventHandler: Fn(&mut Self, HandlerEvent) + 'static + Send,
     {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -249,12 +261,12 @@ where
 
         for rx_event in rx_channel.iter() {
             match rx_event {
-                Event::HandlerEvent(handler_event) => {
+                Event::Handler(handler_event) => {
                     let _dl =
                         ScopedDeadline::new(format!("handle-event-dl-{}", self.name), DEADLINE);
-                    event_handler_func(self, handler_event);
+                    event_handler(self, handler_event);
                 }
-                Event::TimerEvent { callback } => {
+                Event::Timer { callback } => {
                     let _dl =
                         ScopedDeadline::new(format!("timer-event-dl-{}", self.name), DEADLINE);
                     (callback)();
@@ -277,8 +289,9 @@ where
         log::info!("processing events completed");
     }
 
-    pub fn default_stop(&mut self) {
+    pub fn default_stop(&mut self) -> Result<(), ErrorWrap> {
         log::info!("stopping thread name={}", self.name);
+        Ok(())
     }
 
     pub fn add_periodic_timer<F: Fn() + 'static + Send + Sync>(
@@ -291,7 +304,7 @@ where
         let cb: Arc<dyn Fn() + 'static + Send + Sync> = Arc::new(callback);
         let name_cp = self.name.clone();
         let timer = Timer::new(name, delta, TimerType::Periodic, move || {
-            let event = Event::<Type>::TimerEvent {
+            let event = Event::<HandlerEvent>::Timer {
                 callback: cb.clone(),
             };
             match tx_channel_cp.send(event) {
@@ -343,9 +356,10 @@ where
     }
 }
 
-impl<Type> Drop for ThreadExecutor<Type>
+impl<Data, EventType> Drop for ThreadExecutor<Data, EventType>
 where
-    Type: 'static + Send + Sync,
+    Data: 'static + Send,
+    EventType: 'static + Send,
 {
     fn drop(&mut self) {
         log::info!("dropping thread name={}", self.name);
