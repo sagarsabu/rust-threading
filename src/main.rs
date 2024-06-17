@@ -7,8 +7,8 @@ mod threading;
 mod timer;
 
 use crate::{
-    errors::SageError,
-    threading::{SageHandler, SageThread},
+    errors::ErrorWrap,
+    threading::{ThreadHandler, ThreadExecutor},
     timer::{Timer, TimerType},
 };
 use std::sync::{
@@ -25,26 +25,23 @@ enum WorkerEvent {
     TestB,
 }
 
-fn make_worker_threads(n_workers: usize) -> Result<Vec<SageHandler<WorkerEvent>>, SageError> {
-    let workers: Vec<SageHandler<WorkerEvent>> = (0..n_workers)
-        .map(|idx| {
-            SageHandler::new(
-                format!("worker-{}", idx + 1).as_str(),
-                |_thread, event: WorkerEvent| match event {
-                    WorkerEvent::TestA => log::info!("got event - a"),
-                    WorkerEvent::TestB => log::info!("got event - b"),
-                },
-                SageThread::default_start,
-                SageThread::default_stop,
-            )
-            .expect("Failed to create worker thread")
-        })
-        .collect();
-
-    Ok(workers)
+fn make_worker_threads(n_workers: usize) -> Result<Vec<ThreadHandler<WorkerEvent>>, ErrorWrap> {
+    (0..n_workers).try_fold(Vec::new(), |mut acc, idx| {
+        let worker = ThreadHandler::new(
+            format!("worker-{}", idx + 1).as_str(),
+            |_thread, event: WorkerEvent| match event {
+                WorkerEvent::TestA => log::info!("got event - a"),
+                WorkerEvent::TestB => log::info!("got event - b"),
+            },
+            ThreadExecutor::default_start,
+            ThreadExecutor::default_stop,
+        )?;
+        acc.push(worker);
+        Ok(acc)
+    })
 }
 
-fn main() -> Result<(), SageError> {
+fn main() -> Result<(), ErrorWrap> {
     logging::setup_logger()?;
     panic_handler::register_panic_handler();
 
@@ -59,7 +56,7 @@ fn main() -> Result<(), SageError> {
     let arc_timer_id_start_cp = arc_timer_id.clone();
     let arc_timer_id_stop_cp = arc_timer_id.clone();
 
-    let dispatcher = Arc::new(SageHandler::new(
+    let dispatcher = Arc::new(ThreadHandler::new(
         "dispatcher",
         move |_t, event: DispatchEvent| match event {
             DispatchEvent::Dispatch => {

@@ -1,19 +1,18 @@
 use std::{error, fmt};
 
 #[derive(Debug)]
-#[allow(dead_code)]
-pub enum SageError {
+pub enum ErrorWrap {
     Io(std::io::Error),
     Generic(String),
 }
 
-impl SageError {
+impl ErrorWrap {
     pub fn to_generic<E: error::Error>(error: E) -> Self {
         Self::Generic(error.to_string())
     }
 }
 
-impl fmt::Display for SageError {
+impl fmt::Display for ErrorWrap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{}", e),
@@ -22,21 +21,21 @@ impl fmt::Display for SageError {
     }
 }
 
-impl error::Error for SageError {}
+impl error::Error for ErrorWrap {}
 
-impl From<std::io::Error> for SageError {
+impl From<std::io::Error> for ErrorWrap {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
 }
 
-impl From<&str> for SageError {
+impl From<&str> for ErrorWrap {
     fn from(value: &str) -> Self {
         Self::Generic(value.to_string())
     }
 }
 
-impl From<String> for SageError {
+impl From<String> for ErrorWrap {
     fn from(value: String) -> Self {
         Self::Generic(value.to_string())
     }

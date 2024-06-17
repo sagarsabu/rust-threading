@@ -1,4 +1,4 @@
-use crate::{errors::SageError, scoped_deadline::ScopedDeadline};
+use crate::{errors::ErrorWrap, scoped_deadline::ScopedDeadline};
 use std::{
     fmt::Display,
     io::Error,
@@ -11,7 +11,7 @@ use std::{
 
 type TimerCV = Arc<(Mutex<bool>, Condvar)>;
 pub type TimerId = usize;
-pub type TimerCallbackType = Arc<dyn Fn() + 'static + Send + Sync>;
+pub type TimerCallback = Arc<dyn Fn() + 'static + Send + Sync>;
 pub type TimerCollection = std::collections::HashMap<TimerId, Arc<Timer>>;
 
 static TIMER_TID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -23,10 +23,11 @@ extern "C" fn action_handler(
 ) {
     log::debug!("notifying timer thread");
     let (_lock, cv) = &(**get_timer_condition_var());
-    unsafe {
+    let expired = unsafe {
         let expired_ptr = (*_signal_info).si_value().sival_ptr as *mut AtomicBool;
-        *expired_ptr = true.into();
+        &(*expired_ptr)
     };
+    expired.store(true, Ordering::Release);
     cv.notify_one();
     log::debug!("notified timer thread");
 }
@@ -74,7 +75,7 @@ pub struct Timer {
     name: String,
     pub(self) delta: std::time::Duration,
     pub(self) timer_type: TimerType,
-    pub(self) callback: TimerCallbackType,
+    pub(self) callback: TimerCallback,
     pub(self) expired: Arc<AtomicBool>,
     inner: TimerInner,
 }
@@ -93,7 +94,7 @@ impl Timer {
         delta: std::time::Duration,
         timer_type: TimerType,
         timer_callback: Func,
-    ) -> Result<Arc<Self>, SageError>
+    ) -> Result<Arc<Self>, ErrorWrap>
     where
         Func: Fn() + 'static + Send + Sync,
     {
@@ -131,7 +132,7 @@ impl Timer {
                 std::ptr::null_mut(),
             ) == -1
             {
-                return Err(SageError::Io(Error::last_os_error()));
+                return Err(ErrorWrap::Io(Error::last_os_error()));
             }
 
             if libc::timer_create(
@@ -140,7 +141,7 @@ impl Timer {
                 &mut this_timer.inner.timer_id,
             ) == -1
             {
-                return Err(SageError::Io(Error::last_os_error()));
+                return Err(ErrorWrap::Io(Error::last_os_error()));
             }
         }
 
@@ -152,7 +153,7 @@ impl Timer {
         self.id
     }
 
-    pub fn start(self: &Arc<Self>) -> Result<(), SageError> {
+    pub fn start(self: &Arc<Self>) -> Result<(), ErrorWrap> {
         let seconds = self.delta.as_secs() as i64;
         let ns = self.delta.subsec_nanos() as i64;
         unsafe {
@@ -169,7 +170,7 @@ impl Timer {
             };
             if libc::timer_settime(self.inner.timer_id, 0, &timer_spec, std::ptr::null_mut()) == -1
             {
-                return Err(SageError::Io(Error::last_os_error()));
+                return Err(ErrorWrap::Io(Error::last_os_error()));
             }
         }
 
@@ -178,7 +179,7 @@ impl Timer {
         Ok(())
     }
 
-    pub fn stop(self: &Arc<Self>) -> Result<(), SageError> {
+    pub fn stop(self: &Arc<Self>) -> Result<(), ErrorWrap> {
         unsafe {
             let mut timer_spec: libc::itimerspec = std::mem::zeroed();
             timer_spec.it_interval.tv_sec = 0;
@@ -187,7 +188,7 @@ impl Timer {
             timer_spec.it_value.tv_nsec = 0;
             if libc::timer_settime(self.inner.timer_id, 0, &timer_spec, std::ptr::null_mut()) == -1
             {
-                return Err(SageError::Io(Error::last_os_error()));
+                return Err(ErrorWrap::Io(Error::last_os_error()));
             }
         }
 
@@ -243,10 +244,10 @@ fn timer_thread_entry(start_barrier: Arc<std::sync::Barrier>) {
 
         for timer in get_all_timers().values_mut() {
             let expired = timer.expired.as_ref();
-            if !expired.load(Ordering::SeqCst) {
+            if !expired.load(Ordering::Acquire) {
                 continue;
             }
-            expired.store(false, Ordering::SeqCst);
+            expired.store(false, Ordering::Release);
 
             {
                 let _dl = ScopedDeadline::new(

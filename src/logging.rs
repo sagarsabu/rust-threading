@@ -1,4 +1,4 @@
-use crate::errors::SageError;
+use crate::errors::ErrorWrap;
 
 pub struct Logger {
     level: log::Level,
@@ -45,10 +45,10 @@ impl log::Log for Logger {
     }
 }
 
-pub fn setup_logger() -> Result<(), SageError> {
+pub fn setup_logger() -> Result<(), ErrorWrap> {
     let logger = Box::new(Logger::new(log::Level::Info));
     log::set_max_level(logger.get_level_filter());
-    log::set_boxed_logger(logger).map_err(SageError::to_generic)?;
+    log::set_boxed_logger(logger).map_err(ErrorWrap::to_generic)?;
 
     Ok(())
 }

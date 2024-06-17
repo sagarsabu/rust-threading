@@ -1,7 +1,7 @@
 use crate::{
-    errors::SageError,
+    errors::ErrorWrap,
     scoped_deadline::ScopedDeadline,
-    timer::{Timer, TimerCallbackType, TimerCollection, TimerId, TimerType},
+    timer::{Timer, TimerCallback, TimerCollection, TimerId, TimerType},
 };
 use std::{
     sync::{
@@ -12,53 +12,53 @@ use std::{
     thread,
 };
 
-enum ThreadEvent<EventType>
+enum Event<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
-    HandlerEvent(EventType),
-    TimerEvent { callback: TimerCallbackType },
+    HandlerEvent(Type),
+    TimerEvent { callback: TimerCallback },
     Exit,
 }
 
-type ExitCV = (Mutex<bool>, Condvar);
+type ExitCV = Arc<(Mutex<bool>, Condvar)>;
 
-pub struct SageHandler<EventType>
+pub struct ThreadHandler<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
-    pub name: String,
-    tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
+    name: String,
+    tx_channel: mpsc::Sender<Event<Type>>,
     start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
-    exit_notifier: Arc<ExitCV>,
+    exit_notifier: ExitCV,
     stop_requested: Arc<atomic::AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-impl<EventType> SageHandler<EventType>
+impl<Type> ThreadHandler<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
     pub fn new<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
         name: &str,
         event_handler_func: EventHandlerFunc,
         start_handler_func: StartHandlerFunc,
         stop_handler_func: StopHandlerFunc,
-    ) -> Result<Self, SageError>
+    ) -> Result<Self, ErrorWrap>
     where
-        EventHandlerFunc: Fn(&mut SageThread<EventType>, EventType) + 'static + Send,
-        StartHandlerFunc: FnOnce(&mut SageThread<EventType>) + 'static + Send,
-        StopHandlerFunc: FnOnce(&mut SageThread<EventType>) + 'static + Send,
+        EventHandlerFunc: Fn(&mut ThreadExecutor<Type>, Type) + 'static + Send,
+        StartHandlerFunc: FnOnce(&mut ThreadExecutor<Type>) + 'static + Send,
+        StopHandlerFunc: FnOnce(&mut ThreadExecutor<Type>) + 'static + Send,
     {
         log::info!("creating handler: {}", name);
 
         let (tx_channel, rx_channel) = mpsc::channel();
         let start_barrier = Arc::new(sync::Barrier::new(2));
         let running = Arc::new(atomic::AtomicBool::new(false));
-        let exit_notifier = Arc::new((Mutex::new(false), Condvar::new()));
+        let exit_notifier = ExitCV::new((Mutex::new(false), Condvar::new()));
 
-        let thread = SageThread::<EventType> {
+        let thread = ThreadExecutor::<Type> {
             name: name.to_string(),
             running: running.clone(),
             start_barrier: start_barrier.clone(),
@@ -107,8 +107,8 @@ where
         self.running.load(atomic::Ordering::Acquire)
     }
 
-    pub fn transmit_event(&self, event: EventType) {
-        match self.tx_channel.send(ThreadEvent::HandlerEvent(event)) {
+    pub fn transmit_event(&self, event: Type) {
+        match self.tx_channel.send(Event::HandlerEvent(event)) {
             Ok(_) => log::debug!("transmitted event to handler={}", self.name),
             Err(e) => log::error!("failed to transmit event {} to handler={}", e, self.name),
         }
@@ -123,7 +123,7 @@ where
                 break;
             }
 
-            if self.tx_channel.send(ThreadEvent::Exit).is_err() {
+            if self.tx_channel.send(Event::Exit).is_err() {
                 exit_attempt += 1;
                 log::warn!(
                     "failed to send exit event to handler={}. attempt: {}/{}. trying again.",
@@ -138,9 +138,9 @@ where
     }
 }
 
-impl<EventType> Drop for SageHandler<EventType>
+impl<Type> Drop for ThreadHandler<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
     fn drop(&mut self) {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
@@ -191,21 +191,21 @@ where
     }
 }
 
-pub struct SageThread<EventType>
+pub struct ThreadExecutor<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
     name: String,
-    tx_channel: mpsc::Sender<ThreadEvent<EventType>>,
+    tx_channel: mpsc::Sender<Event<Type>>,
     start_barrier: Arc<sync::Barrier>,
-    exit_notifier: Arc<ExitCV>,
+    exit_notifier: ExitCV,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
 }
 
-impl<EventType> SageThread<EventType>
+impl<Type> ThreadExecutor<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
     pub fn default_start(&mut self) {
         log::info!("starting thread name={}", self.name);
@@ -213,12 +213,12 @@ where
 
     fn thread_entry<EventHandlerFunc, StartHandlerFunc, StopHandlerFunc>(
         mut self,
-        rx_channel: mpsc::Receiver<ThreadEvent<EventType>>,
+        rx_channel: mpsc::Receiver<Event<Type>>,
         event_handler_func: EventHandlerFunc,
         start_handler_func: StartHandlerFunc,
         stop_handler_func: StopHandlerFunc,
     ) where
-        EventHandlerFunc: Fn(&mut Self, EventType) + 'static + Send,
+        EventHandlerFunc: Fn(&mut Self, Type) + 'static + Send,
         StartHandlerFunc: FnOnce(&mut Self) + 'static + Send,
         StopHandlerFunc: FnOnce(&mut Self) + 'static + Send,
     {
@@ -238,30 +238,29 @@ where
 
     fn process_events<EventHandlerFunc>(
         &mut self,
-        rx_channel: mpsc::Receiver<ThreadEvent<EventType>>,
+        rx_channel: mpsc::Receiver<Event<Type>>,
         event_handler_func: EventHandlerFunc,
     ) where
-        EventHandlerFunc: Fn(&mut Self, EventType) + 'static + Send,
+        EventHandlerFunc: Fn(&mut Self, Type) + 'static + Send,
     {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+
         log::info!("processing events started for name={}", self.name);
 
         for rx_event in rx_channel.iter() {
             match rx_event {
-                ThreadEvent::HandlerEvent(handler_event) => {
-                    let _dl = ScopedDeadline::new(
-                        format!("handle-event-dl-{}", self.name),
-                        std::time::Duration::from_millis(100),
-                    );
+                Event::HandlerEvent(handler_event) => {
+                    let _dl =
+                        ScopedDeadline::new(format!("handle-event-dl-{}", self.name), DEADLINE);
                     event_handler_func(self, handler_event);
                 }
-                ThreadEvent::TimerEvent { callback } => {
-                    let _dl = ScopedDeadline::new(
-                        format!("timer-event-dl-{}", self.name),
-                        std::time::Duration::from_millis(100),
-                    );
+                Event::TimerEvent { callback } => {
+                    let _dl =
+                        ScopedDeadline::new(format!("timer-event-dl-{}", self.name), DEADLINE);
                     (callback)();
                 }
-                ThreadEvent::Exit => {
+                // TODO Need a way to make high priority events
+                Event::Exit => {
                     log::info!("received exit event. notifying handler and exiting thread.");
                     let (lock, cv) = &*self.exit_notifier;
                     if let Ok(mut lock_guard) = lock.lock() {
@@ -287,12 +286,12 @@ where
         name: &str,
         delta: std::time::Duration,
         callback: F,
-    ) -> Result<TimerId, SageError> {
+    ) -> Result<TimerId, ErrorWrap> {
         let tx_channel_cp = self.tx_channel.clone();
         let cb: Arc<dyn Fn() + 'static + Send + Sync> = Arc::new(callback);
         let name_cp = self.name.clone();
         let timer = Timer::new(name, delta, TimerType::Periodic, move || {
-            let event = ThreadEvent::<EventType>::TimerEvent {
+            let event = Event::<Type>::TimerEvent {
                 callback: cb.clone(),
             };
             match tx_channel_cp.send(event) {
@@ -307,7 +306,7 @@ where
         Ok(timer_id)
     }
 
-    pub fn start_timer(&self, timer_id: &TimerId) -> Result<(), SageError> {
+    pub fn start_timer(&self, timer_id: &TimerId) -> Result<(), ErrorWrap> {
         let timer = self.timers.get(timer_id).ok_or_else(|| {
             format!(
                 "Cannot start timer with id={} that does not exist",
@@ -319,7 +318,7 @@ where
         Ok(())
     }
 
-    pub fn stop_timer(&self, timer_id: &TimerId) -> Result<(), SageError> {
+    pub fn stop_timer(&self, timer_id: &TimerId) -> Result<(), ErrorWrap> {
         let timer = self
             .timers
             .get(timer_id)
@@ -344,9 +343,9 @@ where
     }
 }
 
-impl<EventType> Drop for SageThread<EventType>
+impl<Type> Drop for ThreadExecutor<Type>
 where
-    EventType: 'static + Send + Sync,
+    Type: 'static + Send + Sync,
 {
     fn drop(&mut self) {
         log::info!("dropping thread name={}", self.name);
