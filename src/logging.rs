@@ -28,14 +28,19 @@ impl log::Log for Logger {
             return;
         }
 
-        let current_thread = std::thread::current();
-        let thread_name = current_thread.name().unwrap_or("-");
+        thread_local!(
+            static THREAD_NAME: String = {
+                let current_thread = std::thread::current();
+                let thread_name = current_thread.name().unwrap_or("-");
+                thread_name.to_string()
+            };
+        );
 
         println!(
             "{} [{:^7}] [{:^15}] {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S:%3f"),
             record.level(),
-            thread_name,
+            THREAD_NAME.with(|s| s.clone()),
             record.args()
         );
     }
