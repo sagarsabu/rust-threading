@@ -1,7 +1,5 @@
-use crate::{
-    errors::ErrorWrap,
-    timer::{Timer, TimerType},
-};
+use crate::timer::{Timer, TimerType};
+use rust_errors::ErrorWrap;
 use std::sync::{
     atomic::{self, Ordering},
     Mutex,

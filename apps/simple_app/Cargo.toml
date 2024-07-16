@@ -1,0 +1,10 @@
+[package]
+name = "simple_app"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+log = { workspace = true, features = ["std"] }
+rust_errors = { path = "../../crates/errors" }
+rust_logging = { path = "../../crates/logging" }
+rust_threading = { path = "../../crates/threading" }

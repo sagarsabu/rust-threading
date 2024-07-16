@@ -1,11 +1,10 @@
-[package]
-name = "rust-threading"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = ["apps/*", "crates/*"]
+package.edition = "2021"
+package.version = "0.1.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace.dependencies]
 chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 libc = "0.2"

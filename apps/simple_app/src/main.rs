@@ -1,15 +1,9 @@
-mod errors;
-mod logging;
-mod panic_handler;
-mod scoped_deadline;
-mod signal_handler;
-mod threading;
-mod timer;
-
-use crate::{
-    errors::ErrorWrap,
-    threading::{Executor, Handle, Handler},
+use rust_errors::ErrorWrap;
+use rust_logging;
+use rust_threading::{
+    panic_handler,
     timer::{Timer, TimerId, TimerType},
+    Executor, Handle, Handler,
 };
 use std::sync::Arc;
 
@@ -98,7 +92,7 @@ fn make_worker_threads(n_workers: usize) -> Result<Vec<Handle<WorkerEvent>>, Err
 }
 
 fn main() -> Result<(), ErrorWrap> {
-    logging::setup_logger()?;
+    rust_logging::setup_logger()?;
     panic_handler::register_panic_handler();
 
     let workers = make_worker_threads(4)?;
@@ -121,7 +115,7 @@ fn main() -> Result<(), ErrorWrap> {
     )?;
     dispatch_timer.start()?;
 
-    signal_handler::wait_for_exit(move || {
+    rust_threading::wait_for_exit(move || {
         dispatch_timer.stop()?;
         dispatcher_cp.stop();
 
