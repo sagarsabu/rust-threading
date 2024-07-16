@@ -58,6 +58,12 @@ impl Logger {
     }
 }
 
+fn get_this_thread_name() -> String {
+    let current_thread = std::thread::current();
+    let thread_name = current_thread.name().unwrap_or("-");
+    thread_name.into()
+}
+
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= self.level
@@ -69,11 +75,8 @@ impl log::Log for Logger {
         }
 
         thread_local!(
-            static THREAD_NAME: String = {
-                let current_thread = std::thread::current();
-                let thread_name = current_thread.name().unwrap_or("-");
-                thread_name.to_string()
-            };
+            static THREAD_NAME: std::cell::RefCell<String> =
+                std::cell::RefCell::new(get_this_thread_name());
         );
 
         let format_start = match record.level() {
@@ -84,15 +87,17 @@ impl log::Log for Logger {
             log::Level::Error => format::DARK_RED,
         };
 
-        println!(
-            "{}{} [{:^7}] [{:^15}] {}{}",
-            format_start,
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S:%3f"),
-            record.level(),
-            THREAD_NAME.with(|s| s.clone()),
-            record.args(),
-            format::FORMAT_END
-        );
+        THREAD_NAME.with_borrow(|thread_name: &String| {
+            println!(
+                "{}{} [{:^7}] [{:^15}] {}{}",
+                format_start,
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S:%3f"),
+                record.level(),
+                thread_name,
+                record.args(),
+                format::FORMAT_END
+            )
+        });
     }
 
     fn flush(&self) {
