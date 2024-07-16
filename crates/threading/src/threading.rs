@@ -2,7 +2,7 @@ use crate::{
     scoped_deadline::ScopedDeadline,
     timer::{Timer, TimerCallback, TimerCollection, TimerId, TimerType},
 };
-use rust_errors::ErrorWrap;
+use sg_errors::ErrorWrap;
 use std::{
     sync::{
         self,

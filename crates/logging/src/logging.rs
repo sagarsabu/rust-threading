@@ -1,4 +1,4 @@
-use rust_errors::ErrorWrap;
+use sg_errors::ErrorWrap;
 
 pub struct Logger {
     level: log::Level,

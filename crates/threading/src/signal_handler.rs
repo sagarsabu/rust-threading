@@ -1,5 +1,5 @@
 use crate::timer::{Timer, TimerType};
-use rust_errors::ErrorWrap;
+use sg_errors::ErrorWrap;
 use std::sync::{
     atomic::{self, Ordering},
     Mutex,

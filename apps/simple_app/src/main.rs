@@ -1,6 +1,6 @@
-use rust_errors::ErrorWrap;
-use rust_logging;
-use rust_threading::{
+use sg_errors::ErrorWrap;
+use sg_logging;
+use sg_threading::{
     panic_handler,
     timer::{Timer, TimerId, TimerType},
     Executor, Handle, Handler,
@@ -92,7 +92,7 @@ fn make_worker_threads(n_workers: usize) -> Result<Vec<Handle<WorkerEvent>>, Err
 }
 
 fn main() -> Result<(), ErrorWrap> {
-    rust_logging::setup_logger()?;
+    sg_logging::setup_logger()?;
     panic_handler::register_panic_handler();
 
     let workers = make_worker_threads(4)?;
@@ -115,7 +115,7 @@ fn main() -> Result<(), ErrorWrap> {
     )?;
     dispatch_timer.start()?;
 
-    rust_threading::wait_for_exit(move || {
+    sg_threading::wait_for_exit(move || {
         dispatch_timer.stop()?;
         dispatcher_cp.stop();
 

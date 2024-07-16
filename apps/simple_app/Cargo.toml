@@ -5,6 +5,6 @@ edition = { workspace = true }
 
 [dependencies]
 log = { workspace = true, features = ["std"] }
-rust_errors = { path = "../../crates/errors" }
-rust_logging = { path = "../../crates/logging" }
-rust_threading = { path = "../../crates/threading" }
+sg_errors = { path = "../../crates/errors" }
+sg_logging = { path = "../../crates/logging" }
+sg_threading = { path = "../../crates/threading" }

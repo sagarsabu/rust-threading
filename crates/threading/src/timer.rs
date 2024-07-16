@@ -1,5 +1,5 @@
 use crate::scoped_deadline::ScopedDeadline;
-use rust_errors::ErrorWrap;
+use sg_errors::ErrorWrap;
 use std::{
     fmt::Display,
     io::Error,

@@ -1,5 +1,5 @@
 [package]
-name = "rust_threading"
+name = "sg_threading"
 version = { workspace = true }
 edition = { workspace = true }
 
@@ -9,6 +9,6 @@ edition = { workspace = true }
 lazy_static = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true, features = ["std"] }
-libc = { workspace = true }
-rust_logging = { path = "../logging" }
-rust_errors = { path = "../errors" }
+libc = "0.2"
+sg_logging = { path = "../logging" }
+sg_errors = { path = "../errors" }
