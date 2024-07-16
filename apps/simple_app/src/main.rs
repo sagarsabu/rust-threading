@@ -1,5 +1,4 @@
 use sg_errors::ErrorWrap;
-use sg_logging;
 use sg_threading::{
     panic_handler,
     timer::{Timer, TimerId, TimerType},
