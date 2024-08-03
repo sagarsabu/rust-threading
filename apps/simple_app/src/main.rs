@@ -35,7 +35,11 @@ impl Handler for Dispatcher {
         Ok(())
     }
 
-    fn on_event(&mut self, _thread: &mut Executor<Self::HandlerEvent>, event: Self::HandlerEvent) {
+    fn on_handler_event(
+        &mut self,
+        _thread: &mut Executor<Self::HandlerEvent>,
+        event: Self::HandlerEvent,
+    ) {
         match event {
             DispatchEvent::Dispatch => {
                 self.dispatch_cntr += 1;
@@ -74,7 +78,11 @@ struct Worker;
 impl Handler for Worker {
     type HandlerEvent = WorkerEvent;
 
-    fn on_event(&mut self, _thread: &mut Executor<Self::HandlerEvent>, event: Self::HandlerEvent) {
+    fn on_handler_event(
+        &mut self,
+        _thread: &mut Executor<Self::HandlerEvent>,
+        event: Self::HandlerEvent,
+    ) {
         match event {
             WorkerEvent::TestA => log::info!("got event - a"),
             WorkerEvent::TestB => log::info!("got event - b"),

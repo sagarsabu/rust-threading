@@ -1,9 +1,11 @@
 use crate::{
     scoped_deadline::ScopedDeadline,
+    socket_handler::{IoEvent, TcpServerPoller},
     timer::{Timer, TimerCallback, TimerCollection, TimerId, TimerType},
 };
 use sg_errors::ErrorWrap;
 use std::{
+    net::SocketAddr,
     sync::{
         self,
         atomic::{self, Ordering},
@@ -29,7 +31,13 @@ pub trait Handler {
         Ok(())
     }
 
-    fn on_event(&mut self, thread: &mut Executor<Self::HandlerEvent>, event: Self::HandlerEvent);
+    fn on_handler_event(
+        &mut self,
+        thread: &mut Executor<Self::HandlerEvent>,
+        event: Self::HandlerEvent,
+    );
+
+    fn on_io_event(&mut self, _thread: &mut Executor<Self::HandlerEvent>, _io_event: IoEvent) {}
 
     fn on_stop(&mut self, thread: &mut Executor<Self::HandlerEvent>) -> Result<(), ErrorWrap> {
         log::info!("stopping thread name={}", thread.name);
@@ -78,6 +86,7 @@ where
             exit_notifier: exit_notifier.clone(),
             tx_channel: tx_channel.clone(),
             timers: TimerCollection::new(),
+            io_handles: Vec::new(),
         };
 
         let handle = thread::Builder::new()
@@ -209,6 +218,7 @@ where
     exit_notifier: ExitCV,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
+    io_handles: Vec<TcpServerPoller>,
 }
 
 impl<HandlerEvent> Executor<HandlerEvent>
@@ -254,30 +264,66 @@ where
 
         log::info!("processing events started for name={}", self.name);
 
-        for rx_event in rx_channel.iter() {
-            match rx_event {
-                Event::Handler(handler_event) => {
-                    let _dl =
-                        ScopedDeadline::new(format!("handle-event-dl-{}", self.name), DEADLINE);
-                    runner.on_event(&mut self, handler_event);
-                }
-                Event::Timer { callback } => {
-                    let _dl =
-                        ScopedDeadline::new(format!("timer-event-dl-{}", self.name), DEADLINE);
-                    (callback)();
-                }
-                // TODO Need a way to make high priority events
-                Event::Exit => {
-                    log::info!("received exit event. notifying handler and exiting thread.");
-                    let (lock, cv) = &*self.exit_notifier;
-                    if let Ok(mut lock_guard) = lock.lock() {
-                        *lock_guard = true;
-                        cv.notify_one();
-                    } else {
-                        log::error!("failed to lock exit cv on exit event");
+        loop {
+            match rx_channel.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(rx_event) => {
+                    match rx_event {
+                        Event::Handler(handler_event) => {
+                            let _dl = ScopedDeadline::new(
+                                format!("handle-event-dl-{}", self.name),
+                                DEADLINE,
+                            );
+                            runner.on_handler_event(&mut self, handler_event);
+                        }
+
+                        Event::Timer { callback } => {
+                            let _dl = ScopedDeadline::new(
+                                format!("timer-event-dl-{}", self.name),
+                                DEADLINE,
+                            );
+                            (callback)();
+                        }
+
+                        // TODO Need a way to make high priority events
+                        Event::Exit => {
+                            log::info!(
+                                "received exit event. notifying handler and exiting thread."
+                            );
+                            let (lock, cv) = &*self.exit_notifier;
+                            if let Ok(mut lock_guard) = lock.lock() {
+                                *lock_guard = true;
+                                cv.notify_one();
+                            } else {
+                                log::error!("failed to lock exit cv on exit event");
+                            }
+                            break;
+                        }
                     }
-                    break;
                 }
+
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Handle io polling
+                    let mut all_read_events = vec![];
+                    for io_handle in &mut self.io_handles {
+                        match io_handle.poll_events() {
+                            Ok(mut read_events) => {
+                                all_read_events.append(&mut read_events);
+                            }
+                            Err(e) => log::error!("io handler poll error. {}", e),
+                        }
+                    }
+
+                    for read_event in all_read_events {
+                        let _dl = ScopedDeadline::new(
+                            format!("io-read-event-dl-{}", self.name),
+                            DEADLINE,
+                        );
+                        runner.on_io_event(&mut self, read_event);
+                    }
+                }
+
+                // Handler dropped or shutdown
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 
@@ -285,6 +331,17 @@ where
 
         (self, runner)
     }
+
+    // io
+
+    pub fn add_socket_listener(&mut self, socket_address: SocketAddr) -> Result<(), ErrorWrap> {
+        self.io_handles
+            .push(TcpServerPoller::new(socket_address)?);
+
+        Ok(())
+    }
+
+    // timers
 
     pub fn add_periodic_timer<F: Fn() + 'static + Send + Sync>(
         &mut self,
@@ -354,5 +411,7 @@ where
 {
     fn drop(&mut self) {
         log::info!("dropping thread name={}", self.name);
+        // so all io is shutdown before thread exists
+        self.io_handles.clear();
     }
 }

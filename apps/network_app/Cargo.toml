@@ -1,0 +1,11 @@
+[package]
+name = "network_app"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+log = { workspace = true, features = ["std"] }
+mio = { version = "1.0", features = ["net", "os-poll"] }
+sg_errors = { path = "../../crates/errors" }
+sg_logging = { path = "../../crates/logging" }
+sg_threading = { path = "../../crates/threading" }
