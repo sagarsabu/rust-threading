@@ -24,7 +24,7 @@ impl Connection {
 
 pub struct IoEvent {
     pub socket_address: SocketAddr,
-    pub data: String,
+    pub data: Vec<u8>,
 }
 
 const LISTEN_TK: mio::Token = mio::Token(0);
@@ -96,31 +96,34 @@ impl TcpServerPoller {
 
                     let peer_address = connection.stream.peer_addr()?;
                     if event.is_readable() {
-                        let mut buffer = [0; 512];
+                        use std::io::ErrorKind;
+                        let mut buffer = [0; 1024];
                         match connection.stream.read(&mut buffer) {
                             // connection closed
                             Ok(0) => remove_stream = true,
                             Ok(n_bytes_read) => connection
                                 .read_buffer
                                 .extend_from_slice(&buffer[..n_bytes_read]),
-                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                            Err(e) => {
-                                log::error!("unexpected error reading from {} {}", peer_address, e)
-                            }
-                        }
-
-                        // TODO: pass data to channel receiver
-                        let data = String::from_utf8_lossy(&connection.read_buffer).to_string();
-                        let data = data.trim().to_string();
-
-                        if data == "quit" {
-                            remove_stream = true;
+                            Err(ref e) => match e.kind() {
+                                // try again later
+                                ErrorKind::WouldBlock => {}
+                                // closed
+                                ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset => {
+                                    remove_stream = true
+                                }
+                                // unexpected error
+                                _ => log::error!(
+                                    "unexpected error reading from {} {}",
+                                    peer_address,
+                                    e
+                                ),
+                            },
                         }
 
                         if !remove_stream {
                             read_events.push(IoEvent {
                                 socket_address: peer_address,
-                                data,
+                                data: connection.read_buffer.clone(),
                             });
                         }
 

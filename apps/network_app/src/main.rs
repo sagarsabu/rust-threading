@@ -31,7 +31,7 @@ impl sg_threading::Handler for TcpServer {
         log::info!(
             "peer: {} said: '{}'",
             io_event.socket_address,
-            io_event.data
+            String::from_utf8_lossy(&io_event.data).trim()
         );
     }
 }
