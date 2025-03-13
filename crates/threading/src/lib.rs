@@ -1,4 +1,3 @@
-pub mod panic_handler;
 mod scoped_deadline;
 mod signal_handler;
 mod socket_handler;

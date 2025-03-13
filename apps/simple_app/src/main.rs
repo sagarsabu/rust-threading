@@ -1,17 +1,16 @@
 use sg_errors::ErrorWrap;
 use sg_threading::{
-    panic_handler,
-    timer::{Timer, TimerId, TimerType},
+    timer::{Timer, TimerID, TimerType},
     Executor, Handle, Handler,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 enum DispatchEvent {
     Dispatch,
 }
 
 struct Dispatcher {
-    dispatch_timer_id: TimerId,
+    dispatch_timer_id: TimerID,
     dispatch_cntr: i32,
     workers: Vec<Handle<WorkerEvent>>,
 }
@@ -19,7 +18,7 @@ struct Dispatcher {
 impl Handler for Dispatcher {
     type HandlerEvent = DispatchEvent;
 
-    fn on_start(&mut self, thread: &mut Executor<Self::HandlerEvent>) -> Result<(), ErrorWrap> {
+    fn on_start(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         for worker in &self.workers {
             worker.start();
         }
@@ -27,28 +26,37 @@ impl Handler for Dispatcher {
         self.dispatch_timer_id = thread.add_periodic_timer(
             "dispatcher-periodic-timer",
             std::time::Duration::from_millis(500),
-            || log::info!("timer for dispatcher triggered"),
+            Box::new(|| {
+                log::info!("timer for dispatcher triggered");
+            }),
         )?;
 
         thread.start_timer(&self.dispatch_timer_id)?;
+        let x = thread.add_periodic_timer(
+            "dispatch-loopback-timer",
+            Duration::from_millis(250),
+            Box::new(move || {
+                log::info!("sending dispatch event from dispatcher to all workers");
+                //                for worker in workers {
+                //                    worker.transmit_event(WorkerEvent::TestC);
+                //                }
+            }),
+        )?;
+        thread.start_timer(&x)?;
 
         Ok(())
     }
 
-    fn on_handler_event(
-        &mut self,
-        _thread: &mut Executor<Self::HandlerEvent>,
-        event: Self::HandlerEvent,
-    ) {
+    fn on_handler_event(&mut self, _thread: &mut Executor, event: Self::HandlerEvent) {
         match event {
             DispatchEvent::Dispatch => {
-                self.dispatch_cntr += 1;
                 let event = if self.dispatch_cntr % 2 == 0 {
                     WorkerEvent::TestA
                 } else {
                     WorkerEvent::TestB
                 };
 
+                self.dispatch_cntr += 1;
                 for worker in &self.workers {
                     worker.transmit_event(event.clone());
                 }
@@ -56,7 +64,7 @@ impl Handler for Dispatcher {
         }
     }
 
-    fn on_stop(&mut self, thread: &mut Executor<Self::HandlerEvent>) -> Result<(), ErrorWrap> {
+    fn on_stop(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         for worker in &self.workers {
             worker.stop();
         }
@@ -71,6 +79,7 @@ impl Handler for Dispatcher {
 enum WorkerEvent {
     TestA,
     TestB,
+    TestC,
 }
 
 struct Worker;
@@ -78,14 +87,11 @@ struct Worker;
 impl Handler for Worker {
     type HandlerEvent = WorkerEvent;
 
-    fn on_handler_event(
-        &mut self,
-        _thread: &mut Executor<Self::HandlerEvent>,
-        event: Self::HandlerEvent,
-    ) {
+    fn on_handler_event(&mut self, _thread: &mut Executor, event: Self::HandlerEvent) {
         match event {
             WorkerEvent::TestA => log::info!("got event - a"),
             WorkerEvent::TestB => log::info!("got event - b"),
+            WorkerEvent::TestC => log::info!("got event - c"),
         }
     }
 }
@@ -100,9 +106,8 @@ fn make_worker_threads(n_workers: usize) -> Result<Vec<Handle<WorkerEvent>>, Err
 
 fn main() -> Result<(), ErrorWrap> {
     sg_logging::setup_logger()?;
-    panic_handler::register_panic_handler();
 
-    let workers = make_worker_threads(4)?;
+    let workers = make_worker_threads(1)?;
     let dispatcher = Arc::new(Handle::new("dispatcher", move || {
         Box::new(Dispatcher {
             dispatch_timer_id: 0,
@@ -118,7 +123,9 @@ fn main() -> Result<(), ErrorWrap> {
         "dispatcher",
         std::time::Duration::from_millis(1_000),
         TimerType::Periodic,
-        move || dispatcher.transmit_event(DispatchEvent::Dispatch),
+        Box::new(move || {
+            dispatcher.transmit_event(DispatchEvent::Dispatch);
+        }),
     )?;
     dispatch_timer.start()?;
 

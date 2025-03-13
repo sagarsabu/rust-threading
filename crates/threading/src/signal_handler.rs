@@ -9,9 +9,7 @@ static SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(
 static SIGNAL_CV: std::sync::Condvar = std::sync::Condvar::new();
 
 fn signal_handler(signal: libc::c_int) {
-    let sig_str = unsafe { std::ffi::CStr::from_ptr(libc::strsignal(signal)) };
-    log::info!("signal handler received signal: {:?}", sig_str);
-    SIGNAL.store(signal, Ordering::Relaxed);
+    SIGNAL.store(signal, Ordering::Release);
     SIGNAL_CV.notify_one();
 }
 
@@ -32,7 +30,7 @@ where
         .wait(mtx.lock().expect("Failed to lock mutex"))
         .expect("Failed to wait for signal condition variable");
 
-    match SIGNAL.load(atomic::Ordering::Relaxed) {
+    match SIGNAL.load(atomic::Ordering::Acquire) {
         sig @ (libc::SIGINT | libc::SIGTERM | libc::SIGQUIT) => {
             let sig_str = unsafe { std::ffi::CStr::from_ptr(libc::strsignal(sig)) };
             log::info!("caught signal: {:?}", sig_str);
@@ -46,9 +44,9 @@ where
             "shutdown",
             std::time::Duration::from_millis(200),
             TimerType::FireOnce,
-            || {
+            Box::new(|| {
                 panic!("shutdown deadline exceeded. terminating...");
-            },
+            }),
         )
         .unwrap_or_else(|e| {
             panic!("failed to create shutdown timer. {}. aborting", e);

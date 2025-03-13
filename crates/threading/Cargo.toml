@@ -10,6 +10,7 @@ lazy_static = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true, features = ["std"] }
 mio = { workspace = true }
-libc = "0.2"
+libc = "^0.2"
 sg_logging = { path = "../logging" }
 sg_errors = { path = "../errors" }
+crossbeam-channel = "0.5.14"

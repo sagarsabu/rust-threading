@@ -5,27 +5,23 @@ impl sg_threading::Handler for TcpServer {
 
     fn on_start(
         &mut self,
-        thread: &mut sg_threading::Executor<Self::HandlerEvent>,
+        thread: &mut sg_threading::Executor,
     ) -> Result<(), sg_errors::ErrorWrap> {
-        thread.add_socket_listener(
-            "127.0.0.1:8080"
-                .parse()
-                .map_err(sg_errors::ErrorWrap::to_generic)?,
-        )?;
+        thread.add_socket_listener("127.0.0.1:8080".parse().unwrap())?;
 
         Ok(())
     }
 
     fn on_handler_event(
         &mut self,
-        _thread: &mut sg_threading::Executor<Self::HandlerEvent>,
+        _thread: &mut sg_threading::Executor,
         _event: Self::HandlerEvent,
     ) {
     }
 
     fn on_io_event(
         &mut self,
-        _thread: &mut sg_threading::Executor<Self::HandlerEvent>,
+        _thread: &mut sg_threading::Executor,
         io_event: sg_threading::IoEvent,
     ) {
         log::info!(

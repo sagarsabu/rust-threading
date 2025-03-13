@@ -1,62 +1,58 @@
 use crate::{
     scoped_deadline::ScopedDeadline,
     socket_handler::{IoEvent, TcpServerPoller},
-    timer::{Timer, TimerCallback, TimerCollection, TimerId, TimerType},
+    timer::{Timer, TimerID, TimerType},
 };
+use crossbeam_channel as cc;
 use sg_errors::ErrorWrap;
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{
         self,
-        atomic::{self, Ordering},
-        mpsc, Arc, Condvar, Mutex,
+        atomic::{self},
+        Arc,
     },
     thread,
 };
 
+type TimerCollection = HashMap<TimerID, Timer>;
+
 enum Event<HandlerEvent>
 where
-    HandlerEvent: 'static + Send,
+    HandlerEvent: Send,
 {
     Handler(HandlerEvent),
-    Timer { callback: TimerCallback },
-    Exit,
 }
 
 pub trait Handler {
-    type HandlerEvent: 'static + Send;
+    type HandlerEvent: Send;
 
-    fn on_start(&mut self, thread: &mut Executor<Self::HandlerEvent>) -> Result<(), ErrorWrap> {
+    fn on_start(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         log::info!("starting thread name={}", thread.name);
         Ok(())
     }
 
-    fn on_handler_event(
-        &mut self,
-        thread: &mut Executor<Self::HandlerEvent>,
-        event: Self::HandlerEvent,
-    );
+    fn on_handler_event(&mut self, thread: &mut Executor, event: Self::HandlerEvent);
 
-    fn on_io_event(&mut self, _thread: &mut Executor<Self::HandlerEvent>, _io_event: IoEvent) {}
+    fn on_io_event(&mut self, _thread: &mut Executor, _io_event: IoEvent) {}
 
-    fn on_stop(&mut self, thread: &mut Executor<Self::HandlerEvent>) -> Result<(), ErrorWrap> {
+    fn on_stop(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         log::info!("stopping thread name={}", thread.name);
         Ok(())
     }
 }
-
-type ExitCV = Arc<(Mutex<bool>, Condvar)>;
 
 pub struct Handle<HandlerEvent>
 where
     HandlerEvent: 'static + Send,
 {
     name: String,
-    tx_channel: mpsc::Sender<Event<HandlerEvent>>,
+    event_tx: cc::Sender<Event<HandlerEvent>>,
+    exit_tx: cc::Sender<()>,
     start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
-    exit_notifier: ExitCV,
-    stop_requested: Arc<atomic::AtomicBool>,
+    stop_requested: std::cell::Cell<bool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -74,35 +70,38 @@ where
         let name = name.as_ref();
         log::info!("creating handler: {}", name);
 
-        let (tx_channel, rx_channel) = mpsc::channel();
+        let (event_tx, event_rx) = cc::unbounded();
+        // zero capacity blocking channel to sync shutdown
+        let (exit_tx, exit_rx) = cc::bounded(0);
+
         let start_barrier = Arc::new(sync::Barrier::new(2));
         let running = Arc::new(atomic::AtomicBool::new(false));
-        let exit_notifier = ExitCV::new((Mutex::new(false), Condvar::new()));
 
-        let thread = Executor::<HandlerEvent> {
-            name: name.to_string(),
-            running: running.clone(),
-            start_barrier: start_barrier.clone(),
-            exit_notifier: exit_notifier.clone(),
-            tx_channel: tx_channel.clone(),
-            timers: TimerCollection::new(),
-            io_handles: Vec::new(),
-        };
+        let name_cp = name.to_string();
+        let running_cp = running.clone();
+        let start_barrier_cp = start_barrier.clone();
 
         let handle = thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
-                thread.thread_entry(handler_maker, rx_channel);
+                let thread = Executor {
+                    name: name_cp,
+                    running: running_cp,
+                    start_barrier: start_barrier_cp,
+                    timers: TimerCollection::new(),
+                    io_handles: Vec::new(),
+                };
+                thread.thread_entry(handler_maker, event_rx, exit_rx);
             })?;
 
         Ok(Self {
             name: name.to_string(),
             running,
             start_barrier,
-            exit_notifier,
-            stop_requested: Arc::new(false.into()),
+            stop_requested: false.into(),
             thread_handle: Some(handle),
-            tx_channel,
+            event_tx,
+            exit_tx,
         })
     }
 
@@ -113,45 +112,32 @@ where
     }
 
     pub fn stop(&self) {
-        if !self.stop_requested.load(Ordering::Relaxed) {
+        if !self.stop_requested.get() {
             log::info!("terminating handler={}", self.name);
             self.terminate();
-            self.stop_requested.store(true, Ordering::Relaxed);
+            self.stop_requested.set(true);
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.running.load(atomic::Ordering::Acquire)
+        self.running.load(atomic::Ordering::SeqCst)
     }
 
     pub fn transmit_event(&self, event: HandlerEvent) {
-        match self.tx_channel.send(Event::Handler(event)) {
+        match self.event_tx.send(Event::Handler(event)) {
             Ok(_) => log::debug!("transmitted event to handler={}", self.name),
             Err(e) => log::error!("failed to transmit event {} to handler={}", e, self.name),
         }
     }
 
     fn terminate(&self) {
-        const MAX_EXIT_ATTEMPTS: u8 = 5;
-        let mut exit_attempt = 0u8;
-
-        while exit_attempt <= MAX_EXIT_ATTEMPTS {
-            if !self.is_running() {
-                break;
-            }
-
-            if self.tx_channel.send(Event::Exit).is_err() {
-                exit_attempt += 1;
-                log::warn!(
-                    "failed to send exit event to handler={}. attempt: {}/{}. trying again.",
-                    self.name,
-                    exit_attempt,
-                    MAX_EXIT_ATTEMPTS
-                );
-            } else {
-                break;
-            }
+        if !self.is_running() {
+            return;
         }
+
+        self.exit_tx
+            .send(())
+            .expect("Failed to send exit event to thread");
     }
 }
 
@@ -160,148 +146,105 @@ where
     HandlerEvent: 'static + Send,
 {
     fn drop(&mut self) {
-        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
-
         log::info!("dropping handler={}", self.name);
 
         self.stop();
 
-        let (lock, cv) = &(*self.exit_notifier);
-
-        if let Ok(lock_guard) = lock.lock() {
-            match cv.wait_timeout_while(lock_guard, DEADLINE, |exit_acknowledged| {
-                !*exit_acknowledged
-            }) {
-                Ok((_lock_guard, wait_res)) => {
-                    if wait_res.timed_out() {
-                        log::error!(
-                            "thread handler={} was not notified of exit within deadline={:?}",
-                            self.name,
-                            DEADLINE
-                        );
-                        return;
-                    }
-
-                    if let Some(thread_handle) = self.thread_handle.take() {
-                        match thread_handle.join() {
-                            Ok(_) => log::info!("joined thread for handler={}", self.name),
-                            Err(e) => log::error!(
-                                "failed to join thread for handler={}. {:?}",
-                                self.name,
-                                e
-                            ),
-                        };
-                    } else {
-                        log::error!("join handle does not exist for handler={}", self.name);
-                    }
-                }
-
-                Err(e) => log::error!(
-                    "failed to lock exit cv when waiting in exit cv for handler={} {}",
-                    self.name,
-                    e
-                ),
-            }
+        if let Some(thread_handle) = self.thread_handle.take() {
+            log::info!("started join on thread for handler={}", self.name);
+            match thread_handle.join() {
+                Ok(_) => log::info!("joined thread for handler={}", self.name),
+                Err(e) => log::error!("failed to join thread for handler={}. {:?}", self.name, e),
+            };
         } else {
-            log::error!("failed to lock exit cv when dropping handler={}", self.name,)
+            log::error!("join handle does not exist for handler={}", self.name);
         }
     }
 }
 
-pub struct Executor<HandlerEvent>
-where
-    HandlerEvent: 'static + Send,
-{
+pub struct Executor {
     pub name: String,
-    tx_channel: mpsc::Sender<Event<HandlerEvent>>,
     start_barrier: Arc<sync::Barrier>,
-    exit_notifier: ExitCV,
     running: Arc<atomic::AtomicBool>,
     timers: TimerCollection,
     io_handles: Vec<TcpServerPoller>,
 }
 
-impl<HandlerEvent> Executor<HandlerEvent>
-where
-    HandlerEvent: 'static + Send,
-{
-    fn thread_entry<HandlerMaker>(
+impl Executor {
+    fn thread_entry<HandlerMaker, HandlerEvent>(
         self,
         handler_maker: HandlerMaker,
-        rx_channel: mpsc::Receiver<Event<HandlerEvent>>,
+        event_rx: cc::Receiver<Event<HandlerEvent>>,
+        exit_rx: cc::Receiver<()>,
     ) where
         HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent = HandlerEvent>>,
+        HandlerEvent: Send,
     {
         let mut runner = handler_maker();
-        let mut this_executor = self;
+        let mut this = self;
 
-        this_executor.start_barrier.wait();
-        this_executor.running.store(true, atomic::Ordering::Release);
+        this.start_barrier.wait();
+        this.running.store(true, atomic::Ordering::SeqCst);
 
-        if let Err(e) = runner.on_start(&mut this_executor) {
+        if let Err(e) = runner.on_start(&mut this) {
             log::error!("error encountered during start action. {}", e);
         }
 
-        let (mut this_executor, mut runner) = this_executor.process_events(rx_channel, runner);
+        let (mut this, mut runner) = this.process_events(event_rx, exit_rx, runner);
 
-        if let Err(e) = runner.on_stop(&mut this_executor) {
+        if let Err(e) = runner.on_stop(&mut this) {
             log::error!("error encountered during stop action. {}", e);
         }
 
-        this_executor.stop_all_timers();
+        this.stop_all_timers();
 
-        this_executor
-            .running
-            .store(false, atomic::Ordering::Release);
+        this.running.store(false, atomic::Ordering::SeqCst);
     }
 
-    fn process_events(
+    fn process_events<HandlerEvent>(
         mut self,
-        rx_channel: mpsc::Receiver<Event<HandlerEvent>>,
+        event_rx: cc::Receiver<Event<HandlerEvent>>,
+        exit_rx: cc::Receiver<()>,
         mut runner: Box<dyn Handler<HandlerEvent = HandlerEvent>>,
-    ) -> (Self, Box<dyn Handler<HandlerEvent = HandlerEvent>>) {
+    ) -> (Self, Box<dyn Handler<HandlerEvent = HandlerEvent>>)
+    where
+        HandlerEvent: Send,
+    {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
         log::info!("processing events started for name={}", self.name);
 
+        let mut select = cc::Select::new_biased();
+        let exit_select = select.recv(&exit_rx);
+        let event_select = select.recv(&event_rx);
+
         loop {
-            match rx_channel.recv_timeout(std::time::Duration::from_millis(20)) {
-                Ok(rx_event) => {
-                    match rx_event {
-                        Event::Handler(handler_event) => {
-                            let _dl = ScopedDeadline::new(
-                                format!("handle-event-dl-{}", self.name),
-                                DEADLINE,
-                            );
-                            runner.on_handler_event(&mut self, handler_event);
-                        }
+            match select.select_timeout(std::time::Duration::from_millis(20)) {
+                Ok(select_op) => match select_op.index() {
+                    // exit handling
+                    op if exit_select == op => {
+                        select_op.recv(&exit_rx).expect("exit_rx recv failed");
+                        log::info!("received exit event. exiting thread.");
+                        break;
+                    }
 
-                        Event::Timer { callback } => {
-                            let _dl = ScopedDeadline::new(
-                                format!("timer-event-dl-{}", self.name),
-                                DEADLINE,
-                            );
-                            (callback)();
-                        }
-
-                        // TODO Need a way to make high priority events
-                        Event::Exit => {
-                            log::info!(
-                                "received exit event. notifying handler and exiting thread."
-                            );
-                            let (lock, cv) = &*self.exit_notifier;
-                            if let Ok(mut lock_guard) = lock.lock() {
-                                *lock_guard = true;
-                                cv.notify_one();
-                            } else {
-                                log::error!("failed to lock exit cv on exit event");
+                    op if event_select == op => {
+                        match select_op.recv(&event_rx).expect("even_rx receive failed") {
+                            Event::Handler(handler_event) => {
+                                let _dl = ScopedDeadline::new(
+                                    format!("handle-event-dl-{}", self.name),
+                                    DEADLINE,
+                                );
+                                runner.on_handler_event(&mut self, handler_event);
                             }
-                            break;
                         }
                     }
-                }
 
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    invalid => panic!("invalid select index {}", invalid),
+                },
+
+                // select timeout
+                Err(_) => {
                     // Handle io polling
                     let mut all_read_events = vec![];
                     for io_handle in &mut self.io_handles {
@@ -321,9 +264,6 @@ where
                         runner.on_io_event(&mut self, read_event);
                     }
                 }
-
-                // Handler dropped or shutdown
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 
@@ -335,40 +275,27 @@ where
     // io
 
     pub fn add_socket_listener(&mut self, socket_address: SocketAddr) -> Result<(), ErrorWrap> {
-        self.io_handles
-            .push(TcpServerPoller::new(socket_address)?);
+        self.io_handles.push(TcpServerPoller::new(socket_address)?);
 
         Ok(())
     }
 
     // timers
 
-    pub fn add_periodic_timer<F: Fn() + 'static + Send + Sync>(
+    pub fn add_periodic_timer(
         &mut self,
         name: &str,
         delta: std::time::Duration,
-        callback: F,
-    ) -> Result<TimerId, ErrorWrap> {
-        let tx_channel_cp = self.tx_channel.clone();
-        let cb: Arc<dyn Fn() + 'static + Send + Sync> = Arc::new(callback);
-        let name_cp = self.name.clone();
-        let timer = Timer::new(name, delta, TimerType::Periodic, move || {
-            let event = Event::<HandlerEvent>::Timer {
-                callback: cb.clone(),
-            };
-            match tx_channel_cp.send(event) {
-                Ok(_) => log::debug!("transmitted timer event to handler={}", name_cp),
-                Err(e) => log::error!("{}", e),
-            }
-        })?;
-
+        callback: Box<dyn FnMut()>,
+    ) -> Result<TimerID, ErrorWrap> {
+        let timer = Timer::new(name, delta, TimerType::Periodic, callback)?;
         let timer_id = timer.get_id();
         self.timers.insert(timer_id, timer);
 
         Ok(timer_id)
     }
 
-    pub fn start_timer(&self, timer_id: &TimerId) -> Result<(), ErrorWrap> {
+    pub fn start_timer(&self, timer_id: &TimerID) -> Result<(), ErrorWrap> {
         let timer = self.timers.get(timer_id).ok_or_else(|| {
             format!(
                 "Cannot start timer with id={} that does not exist",
@@ -380,7 +307,7 @@ where
         Ok(())
     }
 
-    pub fn stop_timer(&self, timer_id: &TimerId) -> Result<(), ErrorWrap> {
+    pub fn stop_timer(&self, timer_id: &TimerID) -> Result<(), ErrorWrap> {
         let timer = self
             .timers
             .get(timer_id)
@@ -392,23 +319,21 @@ where
 
     fn stop_all_timers(&self) {
         for (timer_id, timer) in self.timers.iter() {
-            match Timer::stop(timer) {
-                Ok(_) => log::debug!("timer-id={} for handler={} stopped", timer_id, self.name),
-                Err(e) => log::error!(
+            if let Err(e) = Timer::stop(timer) {
+                log::error!(
                     "failed to stop timer-id={} handler={} {}",
                     timer_id,
                     self.name,
                     e
-                ),
+                );
+            } else {
+                log::debug!("timer-id={} for handler={} stopped", timer_id, self.name);
             }
         }
     }
 }
 
-impl<EventType> Drop for Executor<EventType>
-where
-    EventType: 'static + Send,
-{
+impl Drop for Executor {
     fn drop(&mut self) {
         log::info!("dropping thread name={}", self.name);
         // so all io is shutdown before thread exists

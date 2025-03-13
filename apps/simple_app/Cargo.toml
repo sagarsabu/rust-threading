@@ -8,3 +8,9 @@ log = { workspace = true, features = ["std"] }
 sg_errors = { path = "../../crates/errors" }
 sg_logging = { path = "../../crates/logging" }
 sg_threading = { path = "../../crates/threading" }
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
