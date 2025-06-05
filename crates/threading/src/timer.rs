@@ -27,6 +27,7 @@ fn get_next_timer_id() -> TimerID {
     TIMER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[derive(Debug)]
 pub enum TimerType {
     Periodic,
     FireOnce,
@@ -168,6 +169,8 @@ impl Drop for Timer {
                 Error::last_os_error()
             );
         }
+
+        drop(inner);
 
         log::debug!("dropped timer:{}", self);
     }

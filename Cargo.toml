@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["apps/*", "crates/*"]
-package.edition = "2021"
+package.edition = "2024"
 package.version = "0.1.0"
 
 [workspace.dependencies]
@@ -9,3 +9,9 @@ chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 lazy_static = "1.5"
 mio = { version = "1.0", features = ["net", "os-poll"] }
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

@@ -1,41 +1,48 @@
 use crate::{
     scoped_deadline::ScopedDeadline,
     socket_handler::{IoEvent, TcpServerPoller},
-    timer::{Timer, TimerID, TimerType},
+    timer::{TimerID, TimerType},
+    time_handler::{self, TimerEV},
 };
 use crossbeam_channel as cc;
 use sg_errors::ErrorWrap;
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::{
-        self,
+        self, Arc,
         atomic::{self},
-        Arc,
     },
     thread,
 };
 
-type TimerCollection = HashMap<TimerID, Timer>;
-
-enum Event<HandlerEvent>
-where
-    HandlerEvent: Send,
-{
+enum Event<HandlerEvent> {
     Handler(HandlerEvent),
 }
 
-pub trait Handler {
-    type HandlerEvent: Send;
-
+pub trait Handler<HandlerEvent> {
     fn on_start(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         log::info!("starting thread name={}", thread.name);
         Ok(())
     }
 
-    fn on_handler_event(&mut self, thread: &mut Executor, event: Self::HandlerEvent);
+    #[allow(unused_variables)]
+    fn on_handler_event(
+        &mut self,
+        thread: &mut Executor,
+        event: HandlerEvent,
+    ) -> Result<(), ErrorWrap> {
+        Ok(())
+    }
 
-    fn on_io_event(&mut self, _thread: &mut Executor, _io_event: IoEvent) {}
+    #[allow(unused_variables)]
+    fn on_timer_event(&mut self, thread: &mut Executor, id: TimerID) -> Result<(), ErrorWrap> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn on_io_event(&mut self, thread: &mut Executor, io_event: IoEvent) -> Result<(), ErrorWrap> {
+        Ok(())
+    }
 
     fn on_stop(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         log::info!("stopping thread name={}", thread.name);
@@ -65,7 +72,7 @@ where
         handler_maker: HandlerMaker,
     ) -> Result<Self, ErrorWrap>
     where
-        HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent = HandlerEvent>> + 'static + Send,
+        HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent>> + 'static + Send,
     {
         let name = name.as_ref();
         log::info!("creating handler: {}", name);
@@ -84,14 +91,15 @@ where
         let handle = thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
+                let (timer_tx, timer_rx) = cc::unbounded();
                 let thread = Executor {
                     name: name_cp,
                     running: running_cp,
                     start_barrier: start_barrier_cp,
-                    timers: TimerCollection::new(),
+                    timer_tx,
                     io_handles: Vec::new(),
                 };
-                thread.thread_entry(handler_maker, event_rx, exit_rx);
+                thread.thread_entry(handler_maker, event_rx, exit_rx, timer_rx);
             })?;
 
         Ok(Self {
@@ -166,7 +174,7 @@ pub struct Executor {
     pub name: String,
     start_barrier: Arc<sync::Barrier>,
     running: Arc<atomic::AtomicBool>,
-    timers: TimerCollection,
+    timer_tx: cc::Sender<TimerID>,
     io_handles: Vec<TcpServerPoller>,
 }
 
@@ -176,8 +184,9 @@ impl Executor {
         handler_maker: HandlerMaker,
         event_rx: cc::Receiver<Event<HandlerEvent>>,
         exit_rx: cc::Receiver<()>,
+        timer_rx: cc::Receiver<TimerID>,
     ) where
-        HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent = HandlerEvent>>,
+        HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent>>,
         HandlerEvent: Send,
     {
         let mut runner = handler_maker();
@@ -190,13 +199,14 @@ impl Executor {
             log::error!("error encountered during start action. {}", e);
         }
 
-        let (mut this, mut runner) = this.process_events(event_rx, exit_rx, runner);
+        let (mut this, mut runner) = this.process_events(event_rx, exit_rx, timer_rx, runner);
 
         if let Err(e) = runner.on_stop(&mut this) {
             log::error!("error encountered during stop action. {}", e);
         }
 
-        this.stop_all_timers();
+        // so all io is shutdown before thread exists
+        this.io_handles.clear();
 
         this.running.store(false, atomic::Ordering::SeqCst);
     }
@@ -205,18 +215,19 @@ impl Executor {
         mut self,
         event_rx: cc::Receiver<Event<HandlerEvent>>,
         exit_rx: cc::Receiver<()>,
-        mut runner: Box<dyn Handler<HandlerEvent = HandlerEvent>>,
-    ) -> (Self, Box<dyn Handler<HandlerEvent = HandlerEvent>>)
+        timer_rx: cc::Receiver<TimerID>,
+        mut runner: Box<dyn Handler<HandlerEvent>>,
+    ) -> (Self, Box<dyn Handler<HandlerEvent>>)
     where
         HandlerEvent: Send,
     {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
         log::info!("processing events started for name={}", self.name);
-
         let mut select = cc::Select::new_biased();
         let exit_select = select.recv(&exit_rx);
         let event_select = select.recv(&event_rx);
+        let timer_select = select.recv(&timer_rx);
 
         loop {
             match select.select_timeout(std::time::Duration::from_millis(20)) {
@@ -235,8 +246,19 @@ impl Executor {
                                     format!("handle-event-dl-{}", self.name),
                                     DEADLINE,
                                 );
-                                runner.on_handler_event(&mut self, handler_event);
+                                if let Err(e) = runner.on_handler_event(&mut self, handler_event) {
+                                    log::warn!("{} on_handler_event {}", self.name, e);
+                                }
                             }
+                        }
+                    }
+
+                    op if timer_select == op => {
+                        let timer_id = select_op.recv(&timer_rx).expect("timer_rx receive failed");
+                        let _dl =
+                            ScopedDeadline::new(format!("timer-event-dl-{}", self.name), DEADLINE);
+                        if let Err(e) = runner.on_timer_event(&mut self, timer_id) {
+                            log::warn!("{} on_timer_event {}", self.name, e);
                         }
                     }
 
@@ -261,7 +283,9 @@ impl Executor {
                             format!("io-read-event-dl-{}", self.name),
                             DEADLINE,
                         );
-                        runner.on_io_event(&mut self, read_event);
+                        if let Err(e) = runner.on_io_event(&mut self, read_event) {
+                            log::warn!("{} on_io_event {}", self.name, e);
+                        }
                     }
                 }
             }
@@ -283,60 +307,27 @@ impl Executor {
     // timers
 
     pub fn add_periodic_timer(
-        &mut self,
+        &self,
         name: &str,
         delta: std::time::Duration,
-        callback: Box<dyn FnMut()>,
     ) -> Result<TimerID, ErrorWrap> {
-        let timer = Timer::new(name, delta, TimerType::Periodic, callback)?;
-        let timer_id = timer.get_id();
-        self.timers.insert(timer_id, timer);
-
-        Ok(timer_id)
-    }
-
-    pub fn start_timer(&self, timer_id: &TimerID) -> Result<(), ErrorWrap> {
-        let timer = self.timers.get(timer_id).ok_or_else(|| {
-            format!(
-                "Cannot start timer with id={} that does not exist",
-                timer_id
-            )
+        let id = time_handler::get_next_timer_id();
+        time_handler::request_timer_event(TimerEV::AddTimer {
+            id,
+            name: name.to_owned(),
+            delta,
+            timer_type: TimerType::Periodic,
+            timer_tx: self.timer_tx.clone(),
         })?;
 
-        timer.start()?;
-        Ok(())
+        Ok(id)
     }
 
-    pub fn stop_timer(&self, timer_id: &TimerID) -> Result<(), ErrorWrap> {
-        let timer = self
-            .timers
-            .get(timer_id)
-            .ok_or_else(|| format!("Cannot stop timer with id={} that does not exist", timer_id))?;
-
-        timer.stop()?;
-        Ok(())
+    pub fn start_timer(&self, id: TimerID) -> Result<(), ErrorWrap> {
+        time_handler::request_timer_event(TimerEV::StartTimer { id })
     }
 
-    fn stop_all_timers(&self) {
-        for (timer_id, timer) in self.timers.iter() {
-            if let Err(e) = Timer::stop(timer) {
-                log::error!(
-                    "failed to stop timer-id={} handler={} {}",
-                    timer_id,
-                    self.name,
-                    e
-                );
-            } else {
-                log::debug!("timer-id={} for handler={} stopped", timer_id, self.name);
-            }
-        }
-    }
-}
-
-impl Drop for Executor {
-    fn drop(&mut self) {
-        log::info!("dropping thread name={}", self.name);
-        // so all io is shutdown before thread exists
-        self.io_handles.clear();
+    pub fn stop_timer(&self, id: TimerID) -> Result<(), ErrorWrap> {
+        time_handler::request_timer_event(TimerEV::StopTimer { id })
     }
 }

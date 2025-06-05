@@ -1,8 +1,6 @@
 struct TcpServer;
 
-impl sg_threading::Handler for TcpServer {
-    type HandlerEvent = ();
-
+impl sg_threading::Handler<()> for TcpServer {
     fn on_start(
         &mut self,
         thread: &mut sg_threading::Executor,
@@ -12,28 +10,25 @@ impl sg_threading::Handler for TcpServer {
         Ok(())
     }
 
-    fn on_handler_event(
-        &mut self,
-        _thread: &mut sg_threading::Executor,
-        _event: Self::HandlerEvent,
-    ) {
-    }
-
     fn on_io_event(
         &mut self,
         _thread: &mut sg_threading::Executor,
         io_event: sg_threading::IoEvent,
-    ) {
+    ) -> Result<(), sg_errors::ErrorWrap> {
         log::info!(
             "peer: {} said: '{}'",
             io_event.socket_address,
             String::from_utf8_lossy(&io_event.data).trim()
         );
+
+        Ok(())
     }
 }
 
 fn main() -> Result<(), sg_errors::ErrorWrap> {
     sg_logging::setup_logger()?;
+
+    sg_threading::time_handler::create();
 
     let handler = sg_threading::Handle::new("tcp-server", || Box::new(TcpServer))?;
     handler.start();
@@ -42,6 +37,8 @@ fn main() -> Result<(), sg_errors::ErrorWrap> {
         handler.stop();
         Ok(())
     });
+
+    sg_threading::time_handler::stop();
 
     Ok(())
 }

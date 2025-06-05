@@ -1,9 +1,9 @@
 use sg_errors::ErrorWrap;
 use sg_threading::{
-    timer::{Timer, TimerID, TimerType},
     Executor, Handle, Handler,
+    timer::{Timer, TimerID, TimerType},
 };
-use std::{sync::Arc, time::Duration};
+use std::{rc::Rc, time::Duration};
 
 enum DispatchEvent {
     Dispatch,
@@ -12,12 +12,11 @@ enum DispatchEvent {
 struct Dispatcher {
     dispatch_timer_id: TimerID,
     dispatch_cntr: i32,
+    loopback_timer_id: TimerID,
     workers: Vec<Handle<WorkerEvent>>,
 }
 
-impl Handler for Dispatcher {
-    type HandlerEvent = DispatchEvent;
-
+impl Handler<DispatchEvent> for Dispatcher {
     fn on_start(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
         for worker in &self.workers {
             worker.start();
@@ -26,34 +25,28 @@ impl Handler for Dispatcher {
         self.dispatch_timer_id = thread.add_periodic_timer(
             "dispatcher-periodic-timer",
             std::time::Duration::from_millis(500),
-            Box::new(|| {
-                log::info!("timer for dispatcher triggered");
-            }),
         )?;
 
-        thread.start_timer(&self.dispatch_timer_id)?;
-        let x = thread.add_periodic_timer(
-            "dispatch-loopback-timer",
-            Duration::from_millis(250),
-            Box::new(move || {
-                log::info!("sending dispatch event from dispatcher to all workers");
-                //                for worker in workers {
-                //                    worker.transmit_event(WorkerEvent::TestC);
-                //                }
-            }),
-        )?;
-        thread.start_timer(&x)?;
+        thread.start_timer(self.dispatch_timer_id)?;
+        self.loopback_timer_id =
+            thread.add_periodic_timer("dispatch-loopback-timer", Duration::from_millis(200))?;
+        thread.start_timer(self.loopback_timer_id)?;
 
         Ok(())
     }
 
-    fn on_handler_event(&mut self, _thread: &mut Executor, event: Self::HandlerEvent) {
+    fn on_handler_event(
+        &mut self,
+        _thread: &mut Executor,
+        event: DispatchEvent,
+    ) -> Result<(), ErrorWrap> {
         match event {
             DispatchEvent::Dispatch => {
-                let event = if self.dispatch_cntr % 2 == 0 {
-                    WorkerEvent::TestA
-                } else {
-                    WorkerEvent::TestB
+                let event = match self.dispatch_cntr % 3 {
+                    0 => WorkerEvent::TestA,
+                    1 => WorkerEvent::TestB,
+                    2 => WorkerEvent::TestC,
+                    _ => unreachable!(),
                 };
 
                 self.dispatch_cntr += 1;
@@ -62,6 +55,33 @@ impl Handler for Dispatcher {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    fn on_timer_event(&mut self, _thread: &mut Executor, id: TimerID) -> Result<(), ErrorWrap> {
+        match id {
+            id if id == self.dispatch_timer_id => {
+                log::info!("timer for dispatcher triggered");
+            }
+            id if id == self.loopback_timer_id => {
+                log::info!("timer for loopback triggered");
+                let event = match self.dispatch_cntr % 3 {
+                    0 => WorkerEvent::TestA,
+                    1 => WorkerEvent::TestB,
+                    2 => WorkerEvent::TestC,
+                    _ => unreachable!(),
+                };
+                for worker in &self.workers {
+                    worker.transmit_event(event.clone());
+                }
+            }
+            unexpected => {
+                log::error!("unexpected timer {} triggered", unexpected);
+            }
+        };
+
+        Ok(())
     }
 
     fn on_stop(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
@@ -69,12 +89,13 @@ impl Handler for Dispatcher {
             worker.stop();
         }
 
-        thread.stop_timer(&self.dispatch_timer_id)?;
+        thread.stop_timer(self.dispatch_timer_id)?;
 
         Ok(())
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 enum WorkerEvent {
     TestA,
@@ -84,15 +105,19 @@ enum WorkerEvent {
 
 struct Worker;
 
-impl Handler for Worker {
-    type HandlerEvent = WorkerEvent;
-
-    fn on_handler_event(&mut self, _thread: &mut Executor, event: Self::HandlerEvent) {
+impl Handler<WorkerEvent> for Worker {
+    fn on_handler_event(
+        &mut self,
+        _thread: &mut Executor,
+        event: WorkerEvent,
+    ) -> Result<(), ErrorWrap> {
         match event {
             WorkerEvent::TestA => log::info!("got event - a"),
             WorkerEvent::TestB => log::info!("got event - b"),
             WorkerEvent::TestC => log::info!("got event - c"),
         }
+
+        Ok(())
     }
 }
 
@@ -107,12 +132,15 @@ fn make_worker_threads(n_workers: usize) -> Result<Vec<Handle<WorkerEvent>>, Err
 fn main() -> Result<(), ErrorWrap> {
     sg_logging::setup_logger()?;
 
+    sg_threading::time_handler::create();
+
     let workers = make_worker_threads(1)?;
-    let dispatcher = Arc::new(Handle::new("dispatcher", move || {
+    let dispatcher = Rc::new(Handle::new("dispatcher", move || {
         Box::new(Dispatcher {
             dispatch_timer_id: 0,
             dispatch_cntr: 0,
             workers,
+            loopback_timer_id: 0,
         })
     })?);
     dispatcher.start();
@@ -135,6 +163,8 @@ fn main() -> Result<(), ErrorWrap> {
 
         Ok(())
     });
+
+    sg_threading::time_handler::stop();
 
     Ok(())
 }

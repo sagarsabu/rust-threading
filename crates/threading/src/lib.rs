@@ -2,6 +2,8 @@ mod scoped_deadline;
 mod signal_handler;
 mod socket_handler;
 mod threading;
+
+pub mod time_handler;
 pub mod timer;
 
 pub use {
