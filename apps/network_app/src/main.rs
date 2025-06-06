@@ -15,7 +15,7 @@ impl sg_threading::Handler<()> for TcpServer {
         _thread: &mut sg_threading::Executor,
         io_event: sg_threading::IoEvent,
     ) -> Result<(), sg_errors::ErrorWrap> {
-        log::info!(
+        tracing::info!(
             "peer: {} said: '{}'",
             io_event.socket_address,
             String::from_utf8_lossy(&io_event.data).trim()
@@ -26,7 +26,7 @@ impl sg_threading::Handler<()> for TcpServer {
 }
 
 fn main() -> Result<(), sg_errors::ErrorWrap> {
-    sg_logging::setup_logger()?;
+    sg_logging::setup_logger();
 
     sg_threading::time_handler::create();
 

@@ -21,9 +21,9 @@ impl Drop for ScopedDeadline {
         let dur = self.start.elapsed();
         let msg = format!("{} completed in {}ms", self.tag, dur.as_millis());
         if dur > self.deadline {
-            log::warn!("{msg}");
+            tracing::warn!("{msg}");
         } else {
-            log::debug!("{msg}");
+            tracing::debug!("{msg}");
         }
     }
 }

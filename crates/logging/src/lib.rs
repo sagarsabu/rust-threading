@@ -1,3 +1,3 @@
 mod logging;
 
-pub use logging::{setup_logger, Logger};
+pub use logging::setup_logger;

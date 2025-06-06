@@ -1,8 +1,8 @@
 use crate::{
     scoped_deadline::ScopedDeadline,
     socket_handler::{IoEvent, TcpServerPoller},
-    timer::{TimerID, TimerType},
     time_handler::{self, TimerEV},
+    timer::{TimerID, TimerType},
 };
 use crossbeam_channel as cc;
 use sg_errors::ErrorWrap;
@@ -21,7 +21,7 @@ enum Event<HandlerEvent> {
 
 pub trait Handler<HandlerEvent> {
     fn on_start(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
-        log::info!("starting thread name={}", thread.name);
+        tracing::info!("starting thread name={}", thread.name);
         Ok(())
     }
 
@@ -45,7 +45,7 @@ pub trait Handler<HandlerEvent> {
     }
 
     fn on_stop(&mut self, thread: &mut Executor) -> Result<(), ErrorWrap> {
-        log::info!("stopping thread name={}", thread.name);
+        tracing::info!("stopping thread name={}", thread.name);
         Ok(())
     }
 }
@@ -75,7 +75,7 @@ where
         HandlerMaker: FnOnce() -> Box<dyn Handler<HandlerEvent>> + 'static + Send,
     {
         let name = name.as_ref();
-        log::info!("creating handler: {}", name);
+        tracing::info!("creating handler: {}", name);
 
         let (event_tx, event_rx) = cc::unbounded();
         // zero capacity blocking channel to sync shutdown
@@ -114,14 +114,14 @@ where
     }
 
     pub fn start(&self) {
-        log::info!("dispatching start for handler={}", self.name);
+        tracing::info!("dispatching start for handler={}", self.name);
         // Fill up the barrier
         self.start_barrier.wait();
     }
 
     pub fn stop(&self) {
         if !self.stop_requested.get() {
-            log::info!("terminating handler={}", self.name);
+            tracing::info!("terminating handler={}", self.name);
             self.terminate();
             self.stop_requested.set(true);
         }
@@ -133,8 +133,8 @@ where
 
     pub fn transmit_event(&self, event: HandlerEvent) {
         match self.event_tx.send(Event::Handler(event)) {
-            Ok(_) => log::debug!("transmitted event to handler={}", self.name),
-            Err(e) => log::error!("failed to transmit event {} to handler={}", e, self.name),
+            Ok(_) => tracing::debug!("transmitted event to handler={}", self.name),
+            Err(e) => tracing::error!("failed to transmit event {} to handler={}", e, self.name),
         }
     }
 
@@ -154,18 +154,20 @@ where
     HandlerEvent: 'static + Send,
 {
     fn drop(&mut self) {
-        log::info!("dropping handler={}", self.name);
+        tracing::info!("dropping handler={}", self.name);
 
         self.stop();
 
         if let Some(thread_handle) = self.thread_handle.take() {
-            log::info!("started join on thread for handler={}", self.name);
+            tracing::info!("started join on thread for handler={}", self.name);
             match thread_handle.join() {
-                Ok(_) => log::info!("joined thread for handler={}", self.name),
-                Err(e) => log::error!("failed to join thread for handler={}. {:?}", self.name, e),
+                Ok(_) => tracing::info!("joined thread for handler={}", self.name),
+                Err(e) => {
+                    tracing::error!("failed to join thread for handler={}. {:?}", self.name, e)
+                }
             };
         } else {
-            log::error!("join handle does not exist for handler={}", self.name);
+            tracing::error!("join handle does not exist for handler={}", self.name);
         }
     }
 }
@@ -196,13 +198,13 @@ impl Executor {
         this.running.store(true, atomic::Ordering::SeqCst);
 
         if let Err(e) = runner.on_start(&mut this) {
-            log::error!("error encountered during start action. {}", e);
+            tracing::error!("error encountered during start action. {}", e);
         }
 
         let (mut this, mut runner) = this.process_events(event_rx, exit_rx, timer_rx, runner);
 
         if let Err(e) = runner.on_stop(&mut this) {
-            log::error!("error encountered during stop action. {}", e);
+            tracing::error!("error encountered during stop action. {}", e);
         }
 
         // so all io is shutdown before thread exists
@@ -223,7 +225,7 @@ impl Executor {
     {
         const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
-        log::info!("processing events started for name={}", self.name);
+        tracing::info!("processing events started for name={}", self.name);
         let mut select = cc::Select::new_biased();
         let exit_select = select.recv(&exit_rx);
         let event_select = select.recv(&event_rx);
@@ -235,7 +237,7 @@ impl Executor {
                     // exit handling
                     op if exit_select == op => {
                         select_op.recv(&exit_rx).expect("exit_rx recv failed");
-                        log::info!("received exit event. exiting thread.");
+                        tracing::info!("received exit event. exiting thread.");
                         break;
                     }
 
@@ -247,7 +249,7 @@ impl Executor {
                                     DEADLINE,
                                 );
                                 if let Err(e) = runner.on_handler_event(&mut self, handler_event) {
-                                    log::warn!("{} on_handler_event {}", self.name, e);
+                                    tracing::warn!("{} on_handler_event {}", self.name, e);
                                 }
                             }
                         }
@@ -258,7 +260,7 @@ impl Executor {
                         let _dl =
                             ScopedDeadline::new(format!("timer-event-dl-{}", self.name), DEADLINE);
                         if let Err(e) = runner.on_timer_event(&mut self, timer_id) {
-                            log::warn!("{} on_timer_event {}", self.name, e);
+                            tracing::warn!("{} on_timer_event {}", self.name, e);
                         }
                     }
 
@@ -274,7 +276,7 @@ impl Executor {
                             Ok(mut read_events) => {
                                 all_read_events.append(&mut read_events);
                             }
-                            Err(e) => log::error!("io handler poll error. {}", e),
+                            Err(e) => tracing::error!("io handler poll error. {}", e),
                         }
                     }
 
@@ -284,14 +286,14 @@ impl Executor {
                             DEADLINE,
                         );
                         if let Err(e) = runner.on_io_event(&mut self, read_event) {
-                            log::warn!("{} on_io_event {}", self.name, e);
+                            tracing::warn!("{} on_io_event {}", self.name, e);
                         }
                     }
                 }
             }
         }
 
-        log::info!("processing events completed");
+        tracing::info!("processing events completed");
 
         (self, runner)
     }

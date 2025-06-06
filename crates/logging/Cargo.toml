@@ -7,6 +7,6 @@ edition = { workspace = true }
 
 [dependencies]
 lazy_static = { workspace = true }
-chrono = { workspace = true }
-log = { workspace = true, features = ["std"] }
 sg_errors = { path = "../errors" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

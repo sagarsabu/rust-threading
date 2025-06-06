@@ -5,6 +5,7 @@ use sg_threading::{
 };
 use std::{rc::Rc, time::Duration};
 
+#[derive(Debug)]
 enum DispatchEvent {
     Dispatch,
 }
@@ -35,6 +36,7 @@ impl Handler<DispatchEvent> for Dispatcher {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip(self, _thread))]
     fn on_handler_event(
         &mut self,
         _thread: &mut Executor,
@@ -59,13 +61,14 @@ impl Handler<DispatchEvent> for Dispatcher {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip(self, _thread))]
     fn on_timer_event(&mut self, _thread: &mut Executor, id: TimerID) -> Result<(), ErrorWrap> {
         match id {
             id if id == self.dispatch_timer_id => {
-                log::info!("timer for dispatcher triggered");
+                tracing::info!("timer for dispatcher triggered");
             }
             id if id == self.loopback_timer_id => {
-                log::info!("timer for loopback triggered");
+                tracing::info!("timer for loopback triggered");
                 let event = match self.dispatch_cntr % 3 {
                     0 => WorkerEvent::TestA,
                     1 => WorkerEvent::TestB,
@@ -77,7 +80,7 @@ impl Handler<DispatchEvent> for Dispatcher {
                 }
             }
             unexpected => {
-                log::error!("unexpected timer {} triggered", unexpected);
+                tracing::error!("unexpected timer {} triggered", unexpected);
             }
         };
 
@@ -112,9 +115,9 @@ impl Handler<WorkerEvent> for Worker {
         event: WorkerEvent,
     ) -> Result<(), ErrorWrap> {
         match event {
-            WorkerEvent::TestA => log::info!("got event - a"),
-            WorkerEvent::TestB => log::info!("got event - b"),
-            WorkerEvent::TestC => log::info!("got event - c"),
+            WorkerEvent::TestA => tracing::info!("got event - a"),
+            WorkerEvent::TestB => tracing::info!("got event - b"),
+            WorkerEvent::TestC => tracing::info!("got event - c"),
         }
 
         Ok(())
@@ -130,7 +133,7 @@ fn make_worker_threads(n_workers: usize) -> Result<Vec<Handle<WorkerEvent>>, Err
 }
 
 fn main() -> Result<(), ErrorWrap> {
-    sg_logging::setup_logger()?;
+    sg_logging::setup_logger();
 
     sg_threading::time_handler::create();
 

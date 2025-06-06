@@ -48,7 +48,7 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
     let handler = std::thread::Builder::new()
         .name("timers".to_owned())
         .spawn(move || {
-            log::info!("timer thread created");
+            tracing::info!("timer thread created");
 
             let mut timers = TimerCollection::new();
 
@@ -66,7 +66,7 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
                         timer_type,
                         Box::new(move || {
                             if let Err(e) = timer_tx.send(id) {
-                                log::error!("failed to send timer for id {}. {}", id, e);
+                                tracing::error!("failed to send timer for id {}. {}", id, e);
                             }
                         }),
                     ) {
@@ -74,7 +74,7 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
                             timers.insert(id, timer);
                         }
                         Err(e) => {
-                            log::error!("failed to add timer. {}", e);
+                            tracing::error!("failed to add timer. {}", e);
                         }
                     },
                     TimerEV::RemoveTimer { id } => {
@@ -85,14 +85,14 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
                     TimerEV::StartTimer { id } => {
                         if let Some(timer) = timers.get_mut(&id) {
                             if let Err(e) = timer.start() {
-                                log::error!("failed to start timer. {}", e);
+                                tracing::error!("failed to start timer. {}", e);
                             }
                         }
                     }
                     TimerEV::StopTimer { id } => {
                         if let Some(timer) = timers.get_mut(&id) {
                             if let Err(e) = timer.stop() {
-                                log::error!("failed to stop timer. {}", e);
+                                tracing::error!("failed to stop timer. {}", e);
                             }
                         }
                     }
@@ -104,7 +104,7 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
 
             for timer in timers.values() {
                 if let Err(e) = timer.stop() {
-                    log::error!(
+                    tracing::error!(
                         "failed to stop timer {} when stopping timer thread. {}",
                         timer,
                         e
@@ -114,7 +114,7 @@ fn timer_thread() -> Result<TimerThreadOnce, sg_errors::ErrorWrap> {
 
             drop(timers);
 
-            log::info!("timer thread stopped");
+            tracing::info!("timer thread stopped");
         })?;
 
     Ok((tx, Arc::new(Mutex::new(Some(handler)))))

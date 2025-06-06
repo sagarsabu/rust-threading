@@ -56,7 +56,7 @@ impl TcpServerPoller {
             .registry()
             .register(&mut handler.listener, LISTEN_TK, Interest::READABLE)?;
 
-        log::info!("listening on tcp stream: {}", handler.socket_address);
+        tracing::info!("listening on tcp stream: {}", handler.socket_address);
 
         Ok(handler)
     }
@@ -73,7 +73,7 @@ impl TcpServerPoller {
             match event.token() {
                 LISTEN_TK => {
                     let (mut stream, address) = self.listener.accept()?;
-                    log::info!("accepted new stream from {}", address);
+                    tracing::info!("accepted new stream from {}", address);
 
                     let stream_tk = mio::Token(self.next_connection_token);
                     self.next_connection_token += 1;
@@ -88,7 +88,7 @@ impl TcpServerPoller {
 
                     let connection = match self.active_streams.get_mut(&maybe_stream_token) {
                         None => {
-                            log::error!("unknown stream token {:?}", maybe_stream_token);
+                            tracing::error!("unknown stream token {:?}", maybe_stream_token);
                             continue;
                         }
                         Some(con) => con,
@@ -112,7 +112,7 @@ impl TcpServerPoller {
                                     remove_stream = true
                                 }
                                 // unexpected error
-                                _ => log::error!(
+                                _ => tracing::error!(
                                     "unexpected error reading from {} {}",
                                     peer_address,
                                     e
@@ -146,14 +146,14 @@ impl TcpServerPoller {
 
     fn remove_connection(&mut self, stream_token: mio::Token) -> Result<(), ErrorWrap> {
         if let Some(mut connection) = self.active_streams.remove(&stream_token) {
-            log::info!(
+            tracing::info!(
                 "removing connection to '{}'",
                 connection.stream.peer_addr()?
             );
             connection.stream.shutdown(std::net::Shutdown::Both)?;
             self.poller.registry().deregister(&mut connection.stream)?;
         } else {
-            log::error!("cannot remove connection to unknown {:?}", stream_token);
+            tracing::error!("cannot remove connection to unknown {:?}", stream_token);
         }
 
         Ok(())
@@ -168,11 +168,11 @@ impl Drop for TcpServerPoller {
         }
         for s in streams_to_remove {
             if let Err(e) = self.remove_connection(s) {
-                log::error!("failed to remove connection for {:?}. {}", s, e);
+                tracing::error!("failed to remove connection for {:?}. {}", s, e);
             }
         }
         if let Err(e) = self.poller.registry().deregister(&mut self.listener) {
-            log::error!("failed to deregister listener. {}", e)
+            tracing::error!("failed to deregister listener. {}", e)
         }
     }
 }

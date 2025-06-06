@@ -33,7 +33,7 @@ where
     match SIGNAL.load(atomic::Ordering::Acquire) {
         sig @ (libc::SIGINT | libc::SIGTERM | libc::SIGQUIT) => {
             let sig_str = unsafe { std::ffi::CStr::from_ptr(libc::strsignal(sig)) };
-            log::info!("caught signal: {:?}", sig_str);
+            tracing::info!("caught signal: {:?}", sig_str);
         }
         unexpected_signal => panic!("Unexpected signal: {}", unexpected_signal),
     }

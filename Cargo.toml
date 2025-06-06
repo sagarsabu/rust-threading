@@ -5,10 +5,14 @@ package.edition = "2024"
 package.version = "0.1.0"
 
 [workspace.dependencies]
-chrono = "0.4"
-log = { version = "0.4", features = ["std"] }
 lazy_static = "1.5"
 mio = { version = "1.0", features = ["net", "os-poll"] }
+tracing = { version = "0.1.41" }
+tracing-subscriber = { version = "0.3.19", features = [
+    "time",
+    "local-time",
+    "tracing",
+] }
 
 [profile.release]
 panic = "abort"

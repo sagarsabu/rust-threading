@@ -4,7 +4,8 @@ version = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
-log = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 sg_errors = { path = "../../crates/errors" }
 sg_logging = { path = "../../crates/logging" }
 sg_threading = { path = "../../crates/threading" }
